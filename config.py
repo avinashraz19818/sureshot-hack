@@ -55,11 +55,11 @@ WINGO_GAMES = {
 }
 
 # Real Game Bet & Winning Screenshot Automation (Playwright)
-DEMO_AUTO_BET = os.getenv("DEMO_AUTO_BET", "true").lower() in ("true", "1", "yes")
-DEMO_LOGIN_URL = os.getenv("DEMO_LOGIN_URL", "https://bdgwina.biz/#/login")
-DEMO_USERNAME = os.getenv("DEMO_USERNAME", "6556745550")
-DEMO_PASSWORD = os.getenv("DEMO_PASSWORD", "win1222")
-DEMO_BET_AMOUNT = int(os.getenv("DEMO_BET_AMOUNT", "1")) # Base bet in INR
+DEMO_AUTO_BET = True
+DEMO_LOGIN_URL = os.getenv("DEMO_LOGIN_URL", "").strip() or "https://bdgwina.biz/#/login"
+DEMO_USERNAME = os.getenv("DEMO_USERNAME", "").strip() or "6556745550"
+DEMO_PASSWORD = os.getenv("DEMO_PASSWORD", "").strip() or "win1222"
+DEMO_BET_AMOUNT = int(os.getenv("DEMO_BET_AMOUNT", "10").strip() or "10") # Base bet in INR
 HEADLESS = os.getenv("HEADLESS", "true").lower() in ("true", "1", "yes")
 BROWSER_PROFILE_DIR = os.getenv("BROWSER_PROFILE_DIR", os.path.join(os.path.dirname(__file__), "browser_profile"))
 CHROMIUM_PATH = os.getenv("CHROMIUM_PATH", os.getenv("PLAYWRIGHT_CHROMIUM_PATH", ""))
