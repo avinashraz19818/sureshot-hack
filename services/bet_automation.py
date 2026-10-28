@@ -94,10 +94,8 @@ class BetAutomationService:
                 logger.info(f"📸 Delivering live Win Popup screenshot for period {target_issue}!")
                 return shot
 
-        # 3. If nothing in cache, capture genuine real-time live board
-        if self.worker.is_ready:
-            return await self.worker.capture_board_screenshot(game_id=game_id)
-
+        # 3. Only deliver genuine win popup — never send bare board fake screenshot!
+        logger.warning(f"⚠️ No genuine Win Popup captured for period {target_issue}. Skipping screenshot delivery.")
         return None
 
     async def close(self):

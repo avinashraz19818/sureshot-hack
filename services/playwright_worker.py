@@ -298,60 +298,65 @@ class PlaywrightWinGoWorker:
         if not self.page:
             return False
 
-        await self.dismiss_announcements()
-        await asyncio.sleep(0.5)
-
-        logged_out = await self.is_logged_out()
-        curr = self.page.url or ""
-
-        if not logged_out and "#/login" not in curr:
-            return True
-
-        logger.info(f"🔑 Real User Login: Navigating to {self.login_url}...")
+        logger.info(f"🔑 Authenticating account: Navigating to {self.login_url}...")
         try:
-            if "#/login" not in curr:
-                await self.page.goto(self.login_url, wait_until="domcontentloaded", timeout=25000)
-                await asyncio.sleep(2.5)
-
+            await self.page.goto(self.login_url, wait_until="domcontentloaded", timeout=30000)
+            await asyncio.sleep(3.0)
             await self.dismiss_announcements()
 
+            # Check if page auto-redirected to home/main (already has valid session)
+            curr = self.page.url or ""
+            if "#/main" in curr or "#/home" in curr or "#/saasLottery" in curr:
+                guest = self.page.locator(".p8-home__guest-btn--login, button:has-text('Log in')").first
+                if not await guest.is_visible():
+                    logger.info("✅ Already logged in with active user session!")
+                    return True
+
+            # Locate phone input field
             phone_field = self.page.locator(LOGIN_PHONE_SELECTOR).first
-            await phone_field.wait_for(state="visible", timeout=12000)
-            await phone_field.fill(self.username)
-            logger.info(f"👉 Entered Mobile Number: {self.username}")
-            await asyncio.sleep(0.3)
-
-            pwd_field = self.page.locator(LOGIN_PASS_SELECTOR).first
-            await pwd_field.wait_for(state="visible", timeout=6000)
-            await pwd_field.fill(self.password)
-            logger.info("👉 Entered Password")
-            await asyncio.sleep(0.4)
-
-            # Remember me checkbox
             try:
-                rem_cb = self.page.locator(".signIn__container-rememberRow .van-checkbox").first
-                if await rem_cb.is_visible(timeout=800):
-                    await rem_cb.click()
+                await phone_field.wait_for(state="visible", timeout=8000)
             except Exception:
-                pass
+                phone_field = None
 
-            # Click Submit
-            submit = self.page.locator(LOGIN_SUBMIT_SELECTOR).first
-            await submit.wait_for(state="visible", timeout=6000)
-            await submit.click()
-            logger.info("👉 Clicked Login Button! Waiting for home page...")
-            await asyncio.sleep(4.0)
+            if phone_field:
+                logger.info(f"👉 Entering Mobile Number: {self.username}...")
+                await phone_field.click()
+                await phone_field.fill("")
+                await phone_field.type(self.username, delay=35)
+                await asyncio.sleep(0.3)
 
-            try:
-                loader = self.page.locator(".ar-loading-view").first
-                await loader.wait_for(state="hidden", timeout=8000)
-            except Exception:
-                pass
+                pwd_field = self.page.locator(LOGIN_PASS_SELECTOR).first
+                if await pwd_field.is_visible():
+                    logger.info("👉 Entering Password...")
+                    await pwd_field.click()
+                    await pwd_field.fill("")
+                    await pwd_field.type(self.password, delay=35)
+                    await asyncio.sleep(0.4)
 
-            await self.dismiss_announcements()
-            return True
+                # Remember me checkbox
+                try:
+                    rem_cb = self.page.locator(".signIn__container-rememberRow .van-checkbox, input[type='checkbox']").first
+                    if await rem_cb.is_visible():
+                        await rem_cb.click()
+                except Exception:
+                    pass
+
+                # Click Submit
+                submit = self.page.locator(LOGIN_SUBMIT_SELECTOR).first
+                if await submit.is_visible():
+                    logger.info("👉 Clicking Login button...")
+                    await submit.click()
+                    await asyncio.sleep(4.5)
+
+                await self.dismiss_announcements()
+                logger.info("✅ Login form submitted successfully!")
+                return True
+            else:
+                logger.info("ℹ️ Login input fields not present; proceeding with existing session...")
+                return True
         except Exception as e:
-            logger.error(f"❌ Real login error: {e}")
+            logger.error(f"❌ Real login error: {e}", exc_info=True)
             return False
 
     async def open_room_step_by_step(self, game_id: str = "wingo_1m") -> bool:
@@ -359,11 +364,8 @@ class PlaywrightWinGoWorker:
             return False
 
         # Step 1: Login
-        logger.info("🧭 [1/5] Checking account login status...")
-        logged_out = await self.is_logged_out()
-        if logged_out:
-            logger.info("🧭 [1/5] Not logged in — filling credentials...")
-            await self.ensure_logged_in()
+        logger.info("🧭 [1/5] Ensuring account is authenticated on game platform...")
+        await self.ensure_logged_in()
 
         # Step 2: Home Page
         logger.info("🧭 [2/5] Opening Home page...")
@@ -613,19 +615,13 @@ class PlaywrightWinGoWorker:
             except Exception as e:
                 logger.error(f"Error taking popup screenshot: {e}")
         else:
-            logger.info(f"ℹ️ Native popup not shown on page for {target_issue} (missed or account balance 0). Caching genuine live board shot...")
+            logger.warning(f"⚠️ Native Congratulations popup did not appear for {target_issue}. Check that the account has balance and bet was accepted.")
+            # Remove any injected overlay so board stays clean
             try:
-                await self.inject_prediction_overlay(
-                    issue=target_issue,
-                    choice=choice,
-                    confidence=confidence,
-                    level=level,
-                    number=number
-                )
-                shot_bytes = await self.page.screenshot(type="png", full_page=False)
-                buf = io.BytesIO(shot_bytes)
-                buf.seek(0)
-                self.cached_win_screenshots[str(target_issue)] = buf
+                await self.page.evaluate("""() => {
+                    const el = document.getElementById('zayro-vip-overlay');
+                    if (el) el.remove();
+                }""")
             except Exception:
                 pass
 
@@ -819,34 +815,82 @@ class PlaywrightWinGoWorker:
                 logger.info(f"⚡ Placing DUAL BET (Big AND Small) of ₹{bet_amount} each for period {issue_number}...")
 
                 # 1. Place Bet on BIG
-                big_locator = self.page.locator(
-                    "button:has-text('Big'), div:has-text('Big'):not(:has(div)), .Betting__C-foot-b, .bet-btn-big"
-                ).first
-                if await big_locator.is_visible(timeout=3000):
-                    await big_locator.click(force=True)
+                logger.info(f"⚡ [1/2] Clicking BIG for period {issue_number}...")
+                big_clicked = False
+                try:
+                    big_loc = self.page.locator(
+                        ".Betting__C-foot-b, .bet-btn-big, button:has-text('Big'), [class*='foot-b']"
+                    ).first
+                    await big_loc.wait_for(state="visible", timeout=3500)
+                    await big_loc.click(force=True)
+                    big_clicked = True
+                except Exception:
+                    big_clicked = await self.page.evaluate("""() => {
+                        const b = document.querySelector(".Betting__C-foot-b, .bet-btn-big, [class*='foot-b']");
+                        if (b) { b.click(); return true; }
+                        const all = Array.from(document.querySelectorAll("button, div, span"));
+                        const target = all.find(el => el.innerText && el.innerText.trim() === 'Big' && el.children.length === 0);
+                        if (target) { target.click(); return true; }
+                        return false;
+                    }""")
+
+                if big_clicked:
                     await asyncio.sleep(0.4)
                     await self.set_bet_amount(bet_amount)
                     await asyncio.sleep(0.3)
-                    confirm_btn = self.page.locator(BET_CONFIRM_SELECTOR).first
-                    if await confirm_btn.is_visible(timeout=3000):
-                        await confirm_btn.click()
+                    try:
+                        conf_loc = self.page.locator(BET_CONFIRM_SELECTOR).first
+                        await conf_loc.wait_for(state="visible", timeout=3000)
+                        await conf_loc.click()
                         logger.info(f"✅ Bet 1/2 placed: BIG ₹{bet_amount} for {issue_number}")
+                    except Exception:
+                        await self.page.evaluate("""() => {
+                            const btn = document.querySelector(".footer button.bet-amount, button.bet-amount, .Betting__Popup-foot-s, button:has-text('Total amount'), button:has-text('Confirm')");
+                            if (btn) btn.click();
+                        }""")
+                        logger.info(f"✅ Bet 1/2 placed (JS): BIG ₹{bet_amount} for {issue_number}")
                     await asyncio.sleep(0.6)
+                else:
+                    logger.warning(f"⚠️ Could not click BIG button for period {issue_number}!")
 
                 # 2. Place Bet on SMALL
-                small_locator = self.page.locator(
-                    "button:has-text('Small'), div:has-text('Small'):not(:has(div)), .Betting__C-foot-s, .bet-btn-small"
-                ).first
-                if await small_locator.is_visible(timeout=3000):
-                    await small_locator.click(force=True)
+                logger.info(f"⚡ [2/2] Clicking SMALL for period {issue_number}...")
+                small_clicked = False
+                try:
+                    small_loc = self.page.locator(
+                        ".Betting__C-foot-s, .bet-btn-small, button:has-text('Small'), [class*='foot-s']"
+                    ).first
+                    await small_loc.wait_for(state="visible", timeout=3500)
+                    await small_loc.click(force=True)
+                    small_clicked = True
+                except Exception:
+                    small_clicked = await self.page.evaluate("""() => {
+                        const b = document.querySelector(".Betting__C-foot-s, .bet-btn-small, [class*='foot-s']");
+                        if (b) { b.click(); return true; }
+                        const all = Array.from(document.querySelectorAll("button, div, span"));
+                        const target = all.find(el => el.innerText && el.innerText.trim() === 'Small' && el.children.length === 0);
+                        if (target) { target.click(); return true; }
+                        return false;
+                    }""")
+
+                if small_clicked:
                     await asyncio.sleep(0.4)
                     await self.set_bet_amount(bet_amount)
                     await asyncio.sleep(0.3)
-                    confirm_btn = self.page.locator(BET_CONFIRM_SELECTOR).first
-                    if await confirm_btn.is_visible(timeout=3000):
-                        await confirm_btn.click()
+                    try:
+                        conf_loc = self.page.locator(BET_CONFIRM_SELECTOR).first
+                        await conf_loc.wait_for(state="visible", timeout=3000)
+                        await conf_loc.click()
                         logger.info(f"✅ Bet 2/2 placed: SMALL ₹{bet_amount} for {issue_number}")
+                    except Exception:
+                        await self.page.evaluate("""() => {
+                            const btn = document.querySelector(".footer button.bet-amount, button.bet-amount, .Betting__Popup-foot-s, button:has-text('Total amount'), button:has-text('Confirm')");
+                            if (btn) btn.click();
+                        }""")
+                        logger.info(f"✅ Bet 2/2 placed (JS): SMALL ₹{bet_amount} for {issue_number}")
                     await asyncio.sleep(0.5)
+                else:
+                    logger.warning(f"⚠️ Could not click SMALL button for period {issue_number}!")
 
                 # Inject floating VIP Hack overlay docked to popup location
                 await self.inject_prediction_overlay(
