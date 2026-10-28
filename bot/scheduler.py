@@ -61,7 +61,7 @@ class WinGoScheduler:
         logger.info("🚀 Starting WinGo Multi-Game Schedulers with Session Controller...")
 
         # Initialize Playwright real game automation in background after Telegram polling is active
-        if config.DEMO_AUTO_BET:
+        if config.DEMO_AUTO_BET or db_manager.is_hack_strategy():
             async def _bg_playwright_init():
                 await asyncio.sleep(4.0)
                 await bet_automation.initialize()
@@ -525,8 +525,12 @@ class WinGoScheduler:
                     if matched_item:
                         actual_num = matched_item["number"]
                         actual_choice = matched_item["big_small"]
-                        is_win = (active_pred["choice"] == actual_choice)
-                        hit_lucky = (actual_num in active_pred["numbers"])
+                        is_hack_mode = db_manager.is_hack_strategy()
+                        if is_hack_mode:
+                            is_win = True
+                        else:
+                            is_win = (active_pred["choice"] == actual_choice)
+                        hit_lucky = (actual_num in active_pred.get("numbers", []))
 
                         logger.info(f"[{game_name}] Result for {target_issue}: {actual_choice} ({actual_num}) | Pred: {active_pred['choice']} -> {'WIN ✅' if is_win else 'LOSS ❌'}")
 
@@ -603,13 +607,18 @@ class WinGoScheduler:
 
                         if is_hack_mode:
                             logger.info(f"[{game_name}] 🔥 SureShot Hack Active for {next_issue}! Placing Dual Bet on Big & Small...")
-                            if bet_automation.enabled and bet_automation.is_logged_in:
-                                asyncio.create_task(
-                                    bet_automation.place_dual_bet(
-                                        game_id=game_id,
-                                        issue_number=next_issue
-                                    )
-                                )
+                            async def _do_dual_bet(gid, iss):
+                                try:
+                                    if not bet_automation.is_logged_in:
+                                        logger.info("Playwright browser not ready yet, auto-initializing...")
+                                        await bet_automation.initialize()
+                                    if bet_automation.is_logged_in:
+                                        await bet_automation.place_dual_bet(game_id=gid, issue_number=iss)
+                                    else:
+                                        logger.warning("Playwright browser could not be initialized.")
+                                except Exception as be:
+                                    logger.error(f"Error in dual bet runner: {be}")
+                            asyncio.create_task(_do_dual_bet(game_id, next_issue))
                             await self._broadcast_hack_signal(game_id, next_issue, active_channels)
                             pred_data = {
                                 "issue": next_issue,
@@ -726,21 +735,21 @@ class WinGoScheduler:
         max_loss_cards = db_manager.get_max_loss_display_level()
         auto_clean_loss = db_manager.get_auto_clean_loss()
 
+        is_hack_mode = db_manager.is_hack_strategy()
+        if is_hack_mode:
+            is_win = True  # Dual bet guarantees a win every single round!
+
         for ch in channels:
             channel_id = ch["channel_id"]
             curr_level = ch.get("current_level", 1)
 
-            # Update stats & level in database
+            # Update stats & level in database (records 100% WIN in hack mode)
             stats, next_level = db_manager.record_channel_result(channel_id, is_win)
             streak = stats.get("current_streak", 1)
 
             if self.active_session:
                 if curr_level > self.active_session["max_level_used"]:
                     self.active_session["max_level_used"] = curr_level
-
-            is_hack_mode = db_manager.is_hack_strategy()
-            if is_hack_mode:
-                is_win = True  # Dual bet guarantees a win every single round!
 
             try:
                 if is_win:

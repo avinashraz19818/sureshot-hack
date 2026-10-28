@@ -77,7 +77,7 @@ class PlaywrightWinGoWorker:
     """
 
     def __init__(self):
-        self.enabled = config.DEMO_AUTO_BET
+        self.enabled = getattr(config, "DEMO_AUTO_BET", True)
         self.login_url = config.DEMO_LOGIN_URL or "https://bdgwina.biz/#/login"
         self.username = config.DEMO_USERNAME or "6556745550"
         self.password = config.DEMO_PASSWORD or "win1222"
