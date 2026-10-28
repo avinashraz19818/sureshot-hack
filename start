@@ -34,6 +34,10 @@ if ! which google-chrome >/dev/null 2>&1 && ! which google-chrome-stable >/dev/n
     python3 -m playwright install chromium 2>/dev/null || true
 fi
 
+if [ ! -f ".env" ] && [ -f ".env.example" ]; then
+    cp .env.example .env
+fi
+
 nohup python3 "$BOT_FILE" >> "$LOG_FILE" 2>&1 &
 echo $! > "$PID_FILE"
-echo "✅ WinGo VIP Prediction Bot started successfully! PID: $(cat "$PID_FILE")"
+echo "✅ WinGo VIP SureShot Hack Bot started successfully! PID: $(cat "$PID_FILE")"
