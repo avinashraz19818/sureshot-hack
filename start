@@ -21,12 +21,22 @@ if [ -f "$LOG_FILE" ]; then
     > "$LOG_FILE"
 fi
 
-if [ -d ".venv" ]; then
-    . .venv/bin/activate
-elif [ -d "../.venv" ]; then
-    . ../.venv/bin/activate
-elif [ -d "$HOME/.venv" ]; then
-    . "$HOME/.venv/bin/activate"
+VENV_FOUND=0
+for venv_path in ".venv" "$HOME/predction/predction/.venv" "$HOME/predction/.venv" "../predction/predction/.venv" "../.venv" "$HOME/.venv"; do
+    if [ -f "$venv_path/bin/activate" ]; then
+        . "$venv_path/bin/activate"
+        VENV_FOUND=1
+        break
+    fi
+done
+
+if [ "$VENV_FOUND" -eq 0 ]; then
+    echo "Creating virtual environment .venv..."
+    python3 -m venv .venv 2>/dev/null || true
+    if [ -f ".venv/bin/activate" ]; then
+        . .venv/bin/activate
+        pip install -r requirements.txt
+    fi
 fi
 
 # Only try downloading playwright chromium if system Chrome is not already installed
@@ -38,6 +48,6 @@ if [ ! -f ".env" ] && [ -f ".env.example" ]; then
     cp .env.example .env
 fi
 
-nohup python3 "$BOT_FILE" >> "$LOG_FILE" 2>&1 &
+nohup python "$BOT_FILE" >> "$LOG_FILE" 2>&1 &
 echo $! > "$PID_FILE"
 echo "✅ WinGo VIP SureShot Hack Bot started successfully! PID: $(cat "$PID_FILE")"
