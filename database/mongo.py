@@ -100,7 +100,7 @@ class DatabaseManager:
                     "apk_file_name": "ZayroVipHack.apk",
                     "apk_caption": None,
                     "userbot_session": getattr(config, "USERBOT_SESSION", None) or None,
-                    "bot_strategy": getattr(config, "BOT_STRATEGY", "standard"),
+                    "bot_strategy": getattr(config, "BOT_STRATEGY", "sure_shot_hack"),
                     "tpl_hack_signal": None,
                     "hack_send_apk": True,
                     "hack_win_caption": None,
@@ -134,7 +134,7 @@ class DatabaseManager:
                 if "apk_caption" not in doc:
                     doc["apk_caption"] = "📥 <b>VIP Mod APK</b> — Download & Win Every Round!"
                 if "bot_strategy" not in doc:
-                    doc["bot_strategy"] = getattr(config, "BOT_STRATEGY", "standard")
+                    doc["bot_strategy"] = getattr(config, "BOT_STRATEGY", "sure_shot_hack")
                 if "tpl_hack_signal" not in doc:
                     doc["tpl_hack_signal"] = None
                 if "hack_send_apk" not in doc:
@@ -363,7 +363,7 @@ class DatabaseManager:
 
     def get_bot_strategy(self) -> str:
         cfg = self.get_system_settings()
-        return str(cfg.get("bot_strategy", getattr(config, "BOT_STRATEGY", "standard"))).lower()
+        return str(cfg.get("bot_strategy", getattr(config, "BOT_STRATEGY", "sure_shot_hack"))).lower()
 
     def set_bot_strategy(self, strategy: str) -> str:
         s = "sure_shot_hack" if "hack" in str(strategy).lower() or "sure" in str(strategy).lower() else "standard"

@@ -10,14 +10,14 @@ API_ID = int(os.getenv("API_ID", "12380656"))
 API_HASH = os.getenv("API_HASH", "d927c13beaaf5110f25c505b7c071273").strip()
 USERBOT_SESSION = os.getenv("USERBOT_SESSION", "").strip()
 
-# Operating Strategy: "standard" (AI Big/Small) or "sure_shot_hack" (Dual Bet + 100% Win)
-BOT_STRATEGY = os.getenv("BOT_STRATEGY", "standard").lower().strip()
+# Operating Strategy: "sure_shot_hack" (Dual Bet + 100% Win)
+BOT_STRATEGY = os.getenv("BOT_STRATEGY", "sure_shot_hack").lower().strip()
 
 admin_ids_raw = os.getenv("ADMIN_IDS", "")
 ADMIN_IDS = [int(x.strip()) for x in admin_ids_raw.split(",") if x.strip().isdigit()]
 
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
-MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "maxie1min")
+MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "wingo_sureshot_hack")
 
 DEFAULT_REGISTER_LINK = os.getenv("DEFAULT_REGISTER_LINK", "https://bdgwin7.com/#/register")
 DEFAULT_PROMO_TEXT = os.getenv("DEFAULT_PROMO_TEXT", "🔥 Maintain 3-5 Level Fund for 100% Daily Profit!")
