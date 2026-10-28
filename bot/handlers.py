@@ -74,17 +74,15 @@ def _get_admin_panel_text(user_first_name: str) -> str:
     strat = db_manager.get_bot_strategy()
     strat_str = "🔥 SureShot Hack (Dual Bet 100% Win)" if strat == "sure_shot_hack" else "🎯 Standard AI (Big/Small)"
 
-    return f"""👑 <b>𝗪𝗜𝗡𝗚𝗢 𝗔𝗜 𝗣𝗥𝗘𝗗𝗜𝗖𝗧𝗜𝗢𝗡 𝗔𝗗𝗠𝗜𝗡 𝗣𝗔𝗡𝗘𝗟</b> 👑
+    return f"""👑 <b>WIN-GO VIP SURESHOT HACK PANEL</b> 👑
 ━━━━━━━━━━━━━━━━━━━━━━━━━
 👋 Welcome, <b>{safe_name}</b>!
-🎯 <b>Strategy:</b> <code>{strat_str}</code>
-⚡ <b>Operating Mode:</b> <code>{mode_str}</code>
-💰 <b>Base Bet:</b> <code>₹{base_bet}</code> (Martingale: <b>{martingale_mult}X</b>)
-🛡️ <b>Max Public Loss Cards:</b> <b>Level {max_loss}</b> (Anti-Loss Protection)
-🧹 <b>Auto-Delete Loss on Win:</b> <code>{clean_loss}</code>
+⚡ <b>Mode:</b> <code>100% SureShot Dual Bet (Big & Small Both Bet)</code>
+🕒 <b>Operating Mode:</b> <code>{mode_str}</code>
+💰 <b>Dual Bet Amount:</b> <code>₹{base_bet} on Big & ₹{base_bet} on Small</code>
 🎮 <b>Automation Status:</b> <code>{browser_status}</code>
 🔐 <b>Telegram Userbot:</b> <code>{ub_badge}</code>
-🤖 <b>Engine:</b> WinGo 30s, 1M, 3M, 5M (Multi-Game)
+🤖 <b>Engine:</b> WinGo 30s, 1M, 3M, 5M (SureShot Win)
 ━━━━━━━━━━━━━━━━━━━━━━━━━
 Select an option from the menu below:"""
 

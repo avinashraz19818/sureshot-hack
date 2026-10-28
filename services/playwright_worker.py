@@ -52,7 +52,7 @@ CLOSE_SELECTORS = [
 
 WIN_POPUP_JS = """() => {
     const winEls = document.querySelectorAll(
-        '.winning, .winning-modal, .winning-wrap, .winning-body, .isWin, .WinningTip__C, .Winning-Popup, .win-popup, .van-popup, .van-dialog, [class*="winning"], [class*="congratul"]'
+        '.winning, .winning-modal, .winning-wrap, .winning-body, .isWin, .WinningTip__C, .Winning-Popup, .win-popup, .van-popup, .van-dialog, [class*="winning"], [class*="congratul"], [class*="Popup"], [class*="dialog"]'
     );
     for (const el of winEls) {
         if (!el || el.id === 'zayro-vip-overlay' || el.closest('#zayro-vip-overlay')) continue;
@@ -61,7 +61,7 @@ WIN_POPUP_JS = """() => {
         const rect = el.getBoundingClientRect();
         if (rect.width > 50 && rect.height > 50) {
             const txt = (el.innerText || el.textContent || '').toLowerCase();
-            if (txt.includes('congratul') || txt.includes('bonus') || txt.includes('lottery result') || el.classList.contains('isWin')) {
+            if (txt.includes('congratul') || txt.includes('bonus') || txt.includes('lottery result') || txt.includes('winning') || txt.includes('won') || el.classList.contains('isWin')) {
                 return true;
             }
         }
@@ -845,8 +845,14 @@ class PlaywrightWinGoWorker:
                         logger.info(f"✅ Bet 1/2 placed: BIG ₹{bet_amount} for {issue_number}")
                     except Exception:
                         await self.page.evaluate("""() => {
-                            const btn = document.querySelector(".footer button.bet-amount, button.bet-amount, .Betting__Popup-foot-s, button:has-text('Total amount'), button:has-text('Confirm')");
-                            if (btn) btn.click();
+                            const btn = document.querySelector(".footer button.bet-amount, button.bet-amount, .Betting__Popup-foot-s, .van-button--danger, .van-button--primary");
+                            if (btn) { btn.click(); return; }
+                            const all = Array.from(document.querySelectorAll("button, .van-button, div"));
+                            const conf = all.find(b => {
+                                const t = (b.innerText || b.textContent || '');
+                                return t.includes('Total amount') || t.includes('Confirm') || t.includes('Bet');
+                            });
+                            if (conf) conf.click();
                         }""")
                         logger.info(f"✅ Bet 1/2 placed (JS): BIG ₹{bet_amount} for {issue_number}")
                     await asyncio.sleep(0.6)
@@ -884,8 +890,14 @@ class PlaywrightWinGoWorker:
                         logger.info(f"✅ Bet 2/2 placed: SMALL ₹{bet_amount} for {issue_number}")
                     except Exception:
                         await self.page.evaluate("""() => {
-                            const btn = document.querySelector(".footer button.bet-amount, button.bet-amount, .Betting__Popup-foot-s, button:has-text('Total amount'), button:has-text('Confirm')");
-                            if (btn) btn.click();
+                            const btn = document.querySelector(".footer button.bet-amount, button.bet-amount, .Betting__Popup-foot-s, .van-button--danger, .van-button--primary");
+                            if (btn) { btn.click(); return; }
+                            const all = Array.from(document.querySelectorAll("button, .van-button, div"));
+                            const conf = all.find(b => {
+                                const t = (b.innerText || b.textContent || '');
+                                return t.includes('Total amount') || t.includes('Confirm') || t.includes('Bet');
+                            });
+                            if (conf) conf.click();
                         }""")
                         logger.info(f"✅ Bet 2/2 placed (JS): SMALL ₹{bet_amount} for {issue_number}")
                     await asyncio.sleep(0.5)

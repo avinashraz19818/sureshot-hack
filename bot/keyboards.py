@@ -61,20 +61,15 @@ def get_admin_main_keyboard(
 
     keyboard = [
         [
-            InlineKeyboardButton(strat_text, callback_data="admin_toggle_strategy"),
-            InlineKeyboardButton("⚡ SureShot Hack Setup", callback_data="admin_hack_menu")
+            InlineKeyboardButton("⚡ Signal, APK & Stickers Setup", callback_data="admin_hack_menu")
+        ],
+        [
+            InlineKeyboardButton(f"💰 Dual Bet: ₹{base_bet} on Big & ₹{base_bet} on Small", callback_data="admin_set_bet"),
+            InlineKeyboardButton(f"🎮 {browser_badge}", callback_data="admin_browser_status")
         ],
         [
             InlineKeyboardButton(mode_text, callback_data="admin_toggle_mode"),
             InlineKeyboardButton("🕒 VIP Sessions", callback_data="admin_sessions")
-        ],
-        [
-            InlineKeyboardButton(f"💰 Base Bet: ₹{base_bet}", callback_data="admin_set_bet"),
-            InlineKeyboardButton(f"🛡️ Martingale: {martingale_mult}X", callback_data="admin_toggle_martingale")
-        ],
-        [
-            InlineKeyboardButton(f"🚫 Max Loss Alerts: {max_loss_cards}", callback_data="admin_toggle_max_loss"),
-            InlineKeyboardButton(clean_badge, callback_data="admin_toggle_clean_loss")
         ],
         [
             InlineKeyboardButton("📝 Edit ALL Message Templates", callback_data="admin_templates"),
