@@ -49,5 +49,16 @@ if [ ! -f ".env" ] && [ -f ".env.example" ]; then
 fi
 
 nohup python "$BOT_FILE" >> "$LOG_FILE" 2>&1 &
-echo $! > "$PID_FILE"
-echo "✅ WinGo VIP SureShot Hack Bot started successfully! PID: $(cat "$PID_FILE")"
+PID=$!
+echo $PID > "$PID_FILE"
+sleep 2
+
+if ! kill -0 $PID 2>/dev/null; then
+    echo "❌ Bot failed to start! Here is the error from $LOG_FILE:"
+    echo "--------------------------------------------------------"
+    cat "$LOG_FILE"
+    echo "--------------------------------------------------------"
+    exit 1
+fi
+
+echo "✅ WinGo VIP SureShot Hack Bot started successfully! PID: $PID"

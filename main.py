@@ -92,7 +92,7 @@ def main():
     app.add_handler(CommandHandler("logout_userbot", logout_userbot_handler))
     app.add_handler(CommandHandler("cancel", cancel_handler))
     app.add_handler(CallbackQueryHandler(callback_handler))
-    app.add_handler(MessageHandler((filters.TEXT | filters.Document.ALL) & ~filters.COMMAND, message_handler))
+    app.add_handler(MessageHandler((filters.TEXT | filters.Document.ALL | filters.Sticker.ALL) & ~filters.COMMAND, message_handler))
 
     # Resilient polling loop with bootstrap retries
     while True:
