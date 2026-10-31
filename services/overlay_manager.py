@@ -614,6 +614,123 @@ class OverlayManager:
         return "".join(chips)
 
     @classmethod
+    def generate_overlay_payload(
+        cls,
+        issue: str,
+        choice: str,
+        confidence: float = 98.7,
+        level: int = 1,
+        number: Optional[int] = None,
+        brand_title: Optional[str] = None
+    ) -> dict:
+        """
+        Returns {"html": ..., "css": ..., "ball_b64": ..., "ball_num": ..., "ball_color": ..., "choice": ..., "short_issue": ...}
+        Supports both the built-in Zayro VIP Hack Card (with auto brand detection) AND any uploaded custom .html file
+        (whether a standalone <!DOCTYPE html> hack suite or a custom HTML snippet).
+        """
+        import re
+        choice_clean = choice.strip().upper()
+        if choice_clean in ("CONFIRMED", "SURE_SHOT", "WIN", "HACK", ""):
+            outcome_class = "big"
+            main_badge_text = "BIG"
+            conf_str = "100%"
+        else:
+            outcome_class = "big" if choice_clean == "BIG" else "small"
+            main_badge_text = choice_clean
+            conf_str = f"{float(confidence):.1f}%" if float(confidence) > 0 else "98.8%"
+
+        ball = cls.get_ball_info(number, "BIG" if outcome_class == "big" else "SMALL")
+        ball_b64 = cls.get_ball_b64(ball["number"])
+        short_issue = str(issue)[-5:] if len(str(issue)) > 5 else str(issue)
+        brand_title = brand_title or db_manager.get_overlay_brand_name()
+
+        custom_tpl = db_manager.get_custom_html_template()
+        if custom_tpl and len(custom_tpl.strip()) > 40:
+            raw = custom_tpl.strip()
+            extra_styles = []
+            for sm in re.finditer(r"<style[^>]*>([\s\S]*?)</style>", raw, re.IGNORECASE):
+                st_content = sm.group(1)
+                # Strip rules that override host html/body overflow or background
+                st_content = re.sub(r"html\s*,\s*body\s*\{[^}]*\}", "", st_content)
+                st_content = re.sub(r"#target-game-frame\s*\{[^}]*\}", "", st_content)
+                st_content = re.sub(r"#injector-container\s*\{[^}]*\}", "#injector-container { position: relative !important; top: auto !important; left: auto !important; transform: none !important; }", st_content)
+                extra_styles.append(st_content)
+
+            # Extract body or card markup
+            body_match = re.search(r"<body[^>]*>([\s\S]*?)</body>", raw, re.IGNORECASE)
+            body_html = body_match.group(1) if body_match else raw
+            # Remove scripts, iframes, styles, preview toolbars, and warning modals
+            body_html = re.sub(r"<script[\s\S]*?</script>", "", body_html, flags=re.IGNORECASE)
+            body_html = re.sub(r"<style[\s\S]*?</style>", "", body_html, flags=re.IGNORECASE)
+            body_html = re.sub(r"<iframe[\s\S]*?</iframe>", "", body_html, flags=re.IGNORECASE)
+            body_html = re.sub(r"<iframe[^>]*>", "", body_html, flags=re.IGNORECASE)
+
+            # Replace placeholders if present
+            body_html = (
+                body_html
+                .replace("{issue}", str(issue))
+                .replace("{issue_short}", str(short_issue))
+                .replace("{choice}", main_badge_text)
+                .replace("{confidence}", f"{float(confidence):.1f}")
+                .replace("{level}", str(level))
+                .replace("{number}", str(ball["number"]))
+                .replace("{color}", str(ball["color"]))
+                .replace("{brand}", brand_title)
+            )
+
+            combined_css = ZAYRO_CSS + "\n" + "\n".join(extra_styles) + """
+            #zayro-vip-overlay #preview-dashboard,
+            #zayro-vip-overlay #warnOverlay,
+            #zayro-vip-overlay #miniBtn,
+            #zayro-vip-overlay #hitFlash,
+            #zayro-vip-overlay #sv-wait,
+            #zayro-vip-overlay #sv-low,
+            #zayro-vip-overlay #sv-ready,
+            #zayro-vip-overlay #sv-scan {
+                display: none !important;
+            }
+            #zayro-vip-overlay #sv-result,
+            #zayro-vip-overlay [id*="sv-result"] {
+                display: flex !important;
+            }
+            """
+            if body_html.strip():
+                return {
+                    "html": body_html,
+                    "css": combined_css,
+                    "ball_b64": ball_b64,
+                    "ball_num": ball["number"],
+                    "ball_color": ball["color"],
+                    "ball_class": ball["class"],
+                    "choice": main_badge_text,
+                    "outcome_class": outcome_class,
+                    "conf_str": conf_str,
+                    "short_issue": short_issue,
+                    "brand_title": brand_title,
+                }
+
+        html = cls.generate_html(
+            issue=issue,
+            choice=choice,
+            confidence=confidence,
+            level=level,
+            number=number
+        )
+        return {
+            "html": html,
+            "css": ZAYRO_CSS,
+            "ball_b64": ball_b64,
+            "ball_num": ball["number"],
+            "ball_color": ball["color"],
+            "ball_class": ball["class"],
+            "choice": main_badge_text,
+            "outcome_class": outcome_class,
+            "conf_str": conf_str,
+            "short_issue": short_issue,
+            "brand_title": brand_title,
+        }
+
+    @classmethod
     def generate_html(
         cls,
         issue: str,
@@ -623,20 +740,8 @@ class OverlayManager:
         number: Optional[int] = None
     ) -> str:
         """
-        Generates the complete authentic HTML markup for the Zayro VIP Hack Card and floating MiniBtn.
+        Generates the complete authentic HTML markup for the Zayro VIP Hack Card.
         """
-        # Check if custom template exists in db or filesystem
-        custom_tpl = db_manager.get_custom_html_template()
-        if custom_tpl and len(custom_tpl.strip()) > 50:
-            if "<iframe" not in custom_tpl and "<!DOCTYPE" not in custom_tpl and "target-game-frame" not in custom_tpl:
-                rendered = custom_tpl
-                rendered = rendered.replace("{issue}", str(issue))
-                rendered = rendered.replace("{choice}", choice.upper())
-                rendered = rendered.replace("{confidence}", f"{float(confidence):.1f}")
-                rendered = rendered.replace("{level}", str(level))
-                rendered = rendered.replace("{number}", str(number if number is not None else (7 if choice.upper() == "BIG" else 2)))
-                return rendered
-
         choice_clean = choice.strip().upper()
         if choice_clean in ("CONFIRMED", "SURE_SHOT", "WIN", "HACK", ""):
             outcome_class = "big"
@@ -651,6 +756,7 @@ class OverlayManager:
         ball_b64 = cls.get_ball_b64(ball["number"])
         short_issue = str(issue)[-5:] if len(str(issue)) > 5 else str(issue)
         hist_chips_html = cls.render_hist_chips(ball["number"])
+        brand_title = db_manager.get_overlay_brand_name()
 
         ball_img_html = f'<img class="ball-bg-img" id="ballBgImg" src="{ball_b64}" alt="Casino Chip">' if ball_b64 else ''
 
@@ -662,7 +768,7 @@ class OverlayManager:
           </svg>
 
           <!-- TOP DOCKED PILL BADGE -->
-          <div class="card-title-line1">BdgWin VIP Hack</div>
+          <div class="card-title-line1">{brand_title}</div>
 
           <!-- 4 CORNER NOTCH BRACKETS -->
           <div class="card-bracket b-tl"></div>

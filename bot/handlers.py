@@ -3,6 +3,7 @@ import io
 import re
 import html
 import time
+import asyncio
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
@@ -73,6 +74,9 @@ def _get_admin_panel_text(user_first_name: str) -> str:
 
     strat = db_manager.get_bot_strategy()
     strat_str = "🔥 SureShot Hack (Dual Bet 100% Win)" if strat == "sure_shot_hack" else "🎯 Standard AI (Big/Small)"
+    game_url = db_manager.get_game_login_url()
+    game_user = db_manager.get_game_username()
+    brand_title = db_manager.get_overlay_brand_name()
 
     return f"""👑 <b>WIN-GO VIP SURESHOT HACK PANEL</b> 👑
 ━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -80,9 +84,11 @@ def _get_admin_panel_text(user_first_name: str) -> str:
 ⚡ <b>Mode:</b> <code>100% SureShot Dual Bet (Big & Small Both Bet)</code>
 🕒 <b>Operating Mode:</b> <code>{mode_str}</code>
 💰 <b>Dual Bet Amount:</b> <code>₹{base_bet} on Big & ₹{base_bet} on Small</code>
+🌐 <b>Game Platform:</b> <code>{html.escape(game_url)}</code>
+👤 <b>Game Account:</b> <code>{html.escape(str(game_user))}</code>
+🏷️ <b>Hack Card Title:</b> <code>{html.escape(brand_title)}</code>
 🎮 <b>Automation Status:</b> <code>{browser_status}</code>
 🔐 <b>Telegram Userbot:</b> <code>{ub_badge}</code>
-🤖 <b>Engine:</b> WinGo 30s, 1M, 3M, 5M (SureShot Win)
 ━━━━━━━━━━━━━━━━━━━━━━━━━
 Select an option from the menu below:"""
 
@@ -673,60 +679,154 @@ Send new session details now:"""
             reply_markup=get_sessions_manage_keyboard(sessions)
         )
 
-    # 4. Browser Automation Status & Test
+    # 4. Browser Automation Status & Universal Game Login Setup
     elif data == "admin_browser_status":
         ready = bet_automation.is_logged_in
         status_label = "🟢 Logged In & Ready (Playwright)" if ready else "⚪ Disconnected / Initializing"
-        demo_user = config.DEMO_USERNAME or "N/A"
-        demo_url = config.DEMO_LOGIN_URL or "N/A"
+        game_user = db_manager.get_game_username() or "N/A"
+        game_pass = db_manager.get_game_password() or "N/A"
+        game_url = db_manager.get_game_login_url() or "N/A"
+        brand_title = db_manager.get_overlay_brand_name()
 
-        text = f"""🎮 <b>𝗣𝗟𝗔𝗬𝗪𝗥𝗜𝗚𝗛𝗧 𝗔𝗨𝗧𝗢𝗠𝗔𝗧𝗜𝗢𝗡 𝗦𝗧𝗔𝗧𝗨𝗦</b> 🎮
+        bal = await bet_automation.worker.read_balance() if ready else None
+        per = await bet_automation.worker.current_period() if ready else None
+        bal_str = f"₹{bal:,.2f}" if bal is not None else "Reading / Syncing..."
+        per_str = str(per) if per else "N/A"
+
+        text = f"""🎮 <b>𝗨𝗡𝗜𝗩𝗘𝗥𝗦𝗔𝗟 𝗚𝗔𝗠𝗘 𝗟𝗢𝗚𝗜𝗡 & 𝗣𝗟𝗔𝗬𝗪𝗥𝗜𝗚𝗛𝗧 𝗦𝗘𝗧𝗨𝗣</b> 🎮
 ━━━━━━━━━━━━━━━━━━━━━━━━━
 ⚡ <b>Status:</b> <code>{status_label}</code>
-👤 <b>Account:</b> <code>{demo_user}</code>
-🌐 <b>Game Platform:</b> <code>{demo_url}</code>
-🎯 <b>Auto-Bet Mode:</b> <code>{'ENABLED' if config.DEMO_AUTO_BET else 'DISABLED'}</code>
-📸 <b>Real Win Popup:</b> <code>Active Fast Detector (80ms)</code>
+🌐 <b>Game Link:</b> <code>{html.escape(game_url)}</code>
+📱 <b>Phone / ID:</b> <code>{html.escape(str(game_user))}</code>
+🔑 <b>Password:</b> <code>{html.escape(str(game_pass))}</code>
+💰 <b>Live Wallet Balance:</b> <code>{bal_str}</code>
+🔢 <b>Current Period:</b> <code>{per_str}</code>
+🏷️ <b>Hack Card Title:</b> <code>{html.escape(brand_title)}</code>
+📸 <b>Real Win Popup:</b> <code>Active Fast Detector (50ms)</code>
 ━━━━━━━━━━━━━━━━━━━━━━━━━
-Click below to test live bet placement and capture a screenshot:"""
+💡 <i>Use <b>Quick Setup</b> to switch to ANY WinGo game platform (MaanWin, BDGWin, 91Club, Tiranga, OkWin, etc.) in one message!</i>"""
         await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=get_browser_status_keyboard())
 
-    # 5. Browser Test Bet & Screenshot
+    elif data == "input_game_quick_setup":
+        admin_states[user.id] = {"state": "waiting_game_quick_setup"}
+        prompt = """⚡ <b>1-Step Universal Game Quick Setup</b>
+━━━━━━━━━━━━━━━━━━━━━━━━━
+Send your <b>Game Link</b>, <b>Phone/ID</b>, and <b>Password</b> separated by spaces or new lines:
+
+<b>Format:</b>
+<code>https://maanwin44.com/register?inviteCode=SS5JU6N 91000246 a123a123</code>
+
+The bot will automatically:
+1. Detect the platform login route & brand name
+2. Log in with your ID & Password
+3. Sync the WinGo wallet balance
+4. Adapt the injected HTML hack card!
+
+<i>(Send <code>/cancel</code> to abort)</i>"""
+        keyboard = [[InlineKeyboardButton("⬅️ Cancel", callback_data="admin_browser_status")]]
+        await query.edit_message_text(prompt, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif data == "input_game_url":
+        admin_states[user.id] = {"state": "waiting_game_url"}
+        curr_url = db_manager.get_game_login_url()
+        prompt = f"""🔗 <b>Change Game Platform Link</b>
+━━━━━━━━━━━━━━━━━━━━━━━━━
+<b>Current Link:</b>
+<code>{html.escape(curr_url)}</code>
+
+Send the new Game Link (Login link, Register link, or Home link — the bot automatically finds the login & WinGo room):"""
+        keyboard = [[InlineKeyboardButton("⬅️ Cancel", callback_data="admin_browser_status")]]
+        await query.edit_message_text(prompt, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif data == "input_game_user":
+        admin_states[user.id] = {"state": "waiting_game_user"}
+        curr_user = db_manager.get_game_username()
+        prompt = f"""📱 <b>Change Game Phone Number / User ID</b>
+━━━━━━━━━━━━━━━━━━━━━━━━━
+<b>Current Phone / ID:</b> <code>{html.escape(str(curr_user))}</code>
+
+Send the new Phone Number or ID for the game account:"""
+        keyboard = [[InlineKeyboardButton("⬅️ Cancel", callback_data="admin_browser_status")]]
+        await query.edit_message_text(prompt, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif data == "input_game_pass":
+        admin_states[user.id] = {"state": "waiting_game_pass"}
+        prompt = """🔑 <b>Change Game Account Password</b>
+━━━━━━━━━━━━━━━━━━━━━━━━━
+Send the new Password for the game account:"""
+        keyboard = [[InlineKeyboardButton("⬅️ Cancel", callback_data="admin_browser_status")]]
+        await query.edit_message_text(prompt, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif data == "input_overlay_brand":
+        admin_states[user.id] = {"state": "waiting_overlay_brand"}
+        curr_brand = db_manager.get_overlay_brand_name()
+        prompt = f"""🏷️ <b>Change Hack Card Brand Title</b>
+━━━━━━━━━━━━━━━━━━━━━━━━━
+<b>Current Title:</b> <code>{html.escape(curr_brand)}</code>
+
+Send a custom title (e.g. <code>MaanWin VIP Hack</code>, <code>BdgWin VIP Hack</code>, <code>Zayro SureShot</code>), or send <code>auto</code> to automatically detect it from the Game Link:"""
+        keyboard = [[InlineKeyboardButton("⬅️ Cancel", callback_data="admin_browser_status")]]
+        await query.edit_message_text(prompt, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
+
+    # 5. Browser Live Board & Overlay Preview
     elif data == "browser_test_action":
-        await query.answer("Capturing live game board screenshot...", show_alert=False)
-        loading_msg = await query.message.reply_text("⏳ Communicating with Playwright browser on live game screen...")
+        await query.answer("Capturing live game board with Hack Card...", show_alert=False)
+        loading_msg = await query.message.reply_text("⏳ Capturing live game screen with VIP Hack Overlay...")
 
         try:
-            shot_stream = await bet_automation.capture_win_screenshot(
-                game_id="wingo_1m",
-                target_issue="TEST-PERIOD",
+            per = await bet_automation.worker.current_period() or "20261031100010999"
+            bal = await bet_automation.worker.read_balance()
+            brand = db_manager.get_overlay_brand_name()
+            await bet_automation.worker.inject_prediction_overlay(
+                issue=str(per),
                 choice="BIG",
-                actual_number=7,
+                confidence=99.8,
                 level=1,
-                streak=5
+                number=7
             )
+            await asyncio.sleep(0.25)
+            shot_stream = await bet_automation.worker.capture_board_screenshot("wingo_1m")
+            await bet_automation.worker.remove_prediction_overlay()
+
             if shot_stream:
                 raw = shot_stream.getvalue()
+                bal_txt = f"₹{bal:,.2f}" if bal is not None else "N/A"
                 await context.bot.send_photo(
                     chat_id=user.id,
                     photo=io.BytesIO(raw),
-                    caption="📸 <b>Verified Live Screen Capture!</b>\nReal winning popup & board capture is functioning 100% properly.",
+                    caption=(
+                        f"📸 <b>Live Game Board & Hack Overlay Preview!</b>\n"
+                        f"🏷️ <b>Card Brand:</b> <code>{html.escape(brand)}</code>\n"
+                        f"🔢 <b>Live Period:</b> <code>{per}</code>\n"
+                        f"💰 <b>Wallet Balance:</b> <code>{bal_txt}</code>"
+                    ),
                     parse_mode=ParseMode.HTML
                 )
                 await loading_msg.delete()
             else:
-                await loading_msg.edit_text("⚠️ Could not capture screenshot. Check browser logs.")
+                await loading_msg.edit_text("⚠️ Could not capture screenshot. Check browser connection.")
         except Exception as e:
             await loading_msg.edit_text(f"❌ Error during test: {e}")
 
     # 6. Reconnect Browser
     elif data == "browser_reconnect":
-        await query.answer("Reconnecting Playwright browser...", show_alert=True)
+        await query.answer("Reconnecting Playwright browser...", show_alert=False)
+        wait_msg = await query.message.reply_text("🔄 Re-authenticating Playwright browser & syncing game wallet...")
         try:
-            await bet_automation.initialize()
-            await query.answer("Browser reconnected successfully!", show_alert=True)
+            await bet_automation.worker.close()
+            ok = await bet_automation.initialize()
+            bal = await bet_automation.worker.read_balance() if ok else None
+            per = await bet_automation.worker.current_period() if ok else None
+            bal_str = f"₹{bal:,.2f}" if bal is not None else "Unknown"
+            await wait_msg.edit_text(
+                f"✅ <b>Browser Reconnected!</b>\n"
+                f"🌐 <b>URL:</b> <code>{html.escape(db_manager.get_game_login_url())}</code>\n"
+                f"💰 <b>Balance:</b> <code>{bal_str}</code>\n"
+                f"🔢 <b>Period:</b> <code>{per or 'N/A'}</code>",
+                parse_mode=ParseMode.HTML
+            )
         except Exception as e:
-            await query.answer(f"Reconnect failed: {e}", show_alert=True)
+            await wait_msg.edit_text(f"❌ Reconnect failed: {e}")
         text = _get_admin_panel_text(user.first_name)
         await query.edit_message_text(
             text,
@@ -1165,6 +1265,33 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # Direct .html / .htm file upload at any time (even without clicking Upload button first!)
+    if doc and doc.file_name and doc.file_name.lower().endswith((".html", ".htm")):
+        admin_states.pop(user.id, None)
+        try:
+            os.makedirs("uploads", exist_ok=True)
+            tg_file = await doc.get_file()
+            content_bytes = await tg_file.download_as_bytearray()
+            html_code = content_bytes.decode("utf-8", errors="ignore")
+            db_manager.set_custom_html_template(html_code)
+            db_manager.set_html_overlay_enabled(True)
+
+            local_path = os.path.join("uploads", "custom_overlay.html")
+            with open(local_path, "w", encoding="utf-8") as f:
+                f.write(html_code)
+
+            await update.message.reply_text(
+                f"✅ <b>Custom HTML Hack Overlay Activated Automatically!</b>\n"
+                f"📄 <b>File:</b> <code>{html.escape(doc.file_name)}</code> ({len(html_code)} chars)\n"
+                f"🎯 <b>Auto-Adapt:</b> Winning BIG/SMALL, Ball 0-9 & Period will be injected automatically on every Win Popup!",
+                parse_mode=ParseMode.HTML,
+                reply_markup=_get_main_keyboard()
+            )
+        except Exception as e:
+            logger.error(f"Error saving direct HTML file: {e}")
+            await update.message.reply_text(f"❌ Failed to process HTML file: {e}")
+        return
+
     if not state_info:
         return
 
@@ -1580,6 +1707,125 @@ Choose the Telegram Native Colored Button Style below:"""
             "The live game screen will now render this custom card during Playwright runs.",
             parse_mode=ParseMode.HTML,
             reply_markup=_get_main_keyboard()
+        )
+
+    # Case 13: Universal Game Quick Setup (<Link> <Phone/ID> <Password>)
+    elif current_state == "waiting_game_quick_setup":
+        admin_states.pop(user.id, None)
+        tokens = [t.strip() for t in re.split(r"[\s,]+", text) if t.strip()]
+        if len(tokens) < 3:
+            await update.message.reply_text(
+                "❌ <b>Invalid Format!</b> Please send all 3 values separated by spaces:\n"
+                "<code>https://maanwin44.com/register?inviteCode=SS5JU6N 91000246 a123a123</code>",
+                parse_mode=ParseMode.HTML,
+                reply_markup=get_browser_status_keyboard()
+            )
+            return
+
+        new_url, new_user, new_pass = tokens[0], tokens[1], tokens[2]
+        if not new_url.startswith(("http://", "https://")):
+            new_url = "https://" + new_url
+
+        wait_msg = await update.message.reply_text(
+            f"🔄 <b>Connecting to New Game Platform...</b>\n"
+            f"🌐 <b>URL:</b> <code>{html.escape(new_url)}</code>\n"
+            f"📱 <b>ID/Phone:</b> <code>{html.escape(new_user)}</code>\n"
+            f"⏳ Logging in & transferring WinGo wallet balance...",
+            parse_mode=ParseMode.HTML
+        )
+        res = await bet_automation.update_credentials_and_reconnect(
+            login_url=new_url,
+            username=new_user,
+            password=new_pass
+        )
+        bal = res.get("balance")
+        bal_str = f"₹{bal:,.2f}" if bal is not None else "Syncing..."
+        status_icon = "✅ Connected & Logged In!" if res.get("ok") else "⚠️ Saved (Will retry login on next round)"
+        await wait_msg.edit_text(
+            f"🎉 <b>Universal Game Setup Complete!</b>\n━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"⚡ <b>Status:</b> {status_icon}\n"
+            f"🌐 <b>Platform:</b> <code>{html.escape(new_url)}</code>\n"
+            f"📱 <b>Account:</b> <code>{html.escape(new_user)}</code>\n"
+            f"💰 <b>Live Wallet Balance:</b> <code>{bal_str}</code>\n"
+            f"🔢 <b>Current Period:</b> <code>{res.get('period') or 'N/A'}</code>\n"
+            f"🏷️ <b>Auto Hack Card Title:</b> <code>{html.escape(res.get('brand') or 'VIP Hack')}</code>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_browser_status_keyboard()
+        )
+
+    # Case 14: Change Game Link only
+    elif current_state == "waiting_game_url":
+        admin_states.pop(user.id, None)
+        new_url = text.strip()
+        if not new_url.startswith(("http://", "https://")):
+            new_url = "https://" + new_url
+        wait_msg = await update.message.reply_text(
+            f"🔄 Updating Game Link to <code>{html.escape(new_url)}</code> & reconnecting...",
+            parse_mode=ParseMode.HTML
+        )
+        res = await bet_automation.update_credentials_and_reconnect(login_url=new_url)
+        bal = res.get("balance")
+        bal_str = f"₹{bal:,.2f}" if bal is not None else "Syncing..."
+        await wait_msg.edit_text(
+            f"✅ <b>Game Link Updated & Connected!</b>\n"
+            f"🌐 <b>URL:</b> <code>{html.escape(new_url)}</code>\n"
+            f"🏷️ <b>Hack Card Title:</b> <code>{html.escape(res.get('brand') or '')}</code>\n"
+            f"💰 <b>Wallet Balance:</b> <code>{bal_str}</code>\n"
+            f"🔢 <b>Period:</b> <code>{res.get('period') or 'N/A'}</code>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_browser_status_keyboard()
+        )
+
+    # Case 15: Change Game Phone / ID only
+    elif current_state == "waiting_game_user":
+        admin_states.pop(user.id, None)
+        new_user = text.strip()
+        wait_msg = await update.message.reply_text(
+            f"🔄 Updating Game Phone/ID to <code>{html.escape(new_user)}</code> & reconnecting...",
+            parse_mode=ParseMode.HTML
+        )
+        res = await bet_automation.update_credentials_and_reconnect(username=new_user)
+        bal = res.get("balance")
+        bal_str = f"₹{bal:,.2f}" if bal is not None else "Syncing..."
+        await wait_msg.edit_text(
+            f"✅ <b>Game Account ID Updated & Connected!</b>\n"
+            f"📱 <b>Account:</b> <code>{html.escape(new_user)}</code>\n"
+            f"💰 <b>Wallet Balance:</b> <code>{bal_str}</code>\n"
+            f"🔢 <b>Period:</b> <code>{res.get('period') or 'N/A'}</code>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_browser_status_keyboard()
+        )
+
+    # Case 16: Change Game Password only
+    elif current_state == "waiting_game_pass":
+        admin_states.pop(user.id, None)
+        new_pass = text.strip()
+        wait_msg = await update.message.reply_text("🔄 Updating Game Password & reconnecting...")
+        res = await bet_automation.update_credentials_and_reconnect(password=new_pass)
+        bal = res.get("balance")
+        bal_str = f"₹{bal:,.2f}" if bal is not None else "Syncing..."
+        await wait_msg.edit_text(
+            f"✅ <b>Game Password Updated & Connected!</b>\n"
+            f"💰 <b>Wallet Balance:</b> <code>{bal_str}</code>\n"
+            f"🔢 <b>Period:</b> <code>{res.get('period') or 'N/A'}</code>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_browser_status_keyboard()
+        )
+
+    # Case 17: Change Hack Card Brand Title
+    elif current_state == "waiting_overlay_brand":
+        admin_states.pop(user.id, None)
+        val = text.strip()
+        if val.lower() in ("auto", "default", "reset"):
+            db_manager.set_overlay_brand_name(None)
+        else:
+            db_manager.set_overlay_brand_name(val)
+        resolved = db_manager.get_overlay_brand_name()
+        await update.message.reply_text(
+            f"✅ <b>Hack Card Brand Title Updated!</b>\n"
+            f"🏷️ <b>Active Title:</b> <code>{html.escape(resolved)}</code>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_browser_status_keyboard()
         )
 
 # ================= USERBOT COMMAND HANDLERS =================

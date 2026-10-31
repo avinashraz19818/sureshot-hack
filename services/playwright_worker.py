@@ -24,7 +24,7 @@ MOBILE_CONTEXT = {
 PERIOD_SELECTOR = ".TimeLeft__C-id"
 TIME_SELECTOR = ".TimeLeft__C-time"
 BALANCE_SELECTOR = ".Wallet__C-balance-l1, .Wallet__C-balance"
-GAME_ITEM_SELECTOR = ".GameList__C-item"
+GAME_ITEM_SELECTOR = ".GameList__C-item, .timer-card"
 BET_POPUP_SELECTOR = ".Betting__Popup-body, .lottery-container"
 BET_CONFIRM_SELECTOR = ".Betting__Popup-foot-s, .footer button.bet-amount, button.bet-amount"
 BET_CANCEL_SELECTOR = ".Betting__Popup-foot-c, .footer button.cancel, button.cancel"
@@ -32,14 +32,16 @@ BET_AGREE_SELECTOR = ".Betting__Popup-agree, .agreement div[role='checkbox'], .a
 TOAST_FAIL_SELECTOR = ".van-toast--fail, .van-toast:has-text('insufficient'), .van-toast:has-text('fail'), .van-toast:has-text('parameter'), .van-toast:has-text('balance')"
 WIN_DIALOG_SELECTOR = ".winning:not([style*='display: none']), .winning-body.isWin, .winning-wrap-l1.isWin, .WinningTip__C"
 
-LOGIN_PHONE_SELECTOR = "input[name='userNumber'], input[placeholder*='phone'], input[placeholder*='Phone'], input[type='tel']"
-LOGIN_PASS_SELECTOR = "input[type='password']"
-LOGIN_SUBMIT_SELECTOR = "button:has-text('Log in'), button:has-text('Login'), .signIn__container-button button, .login-btn, button[type='submit']"
+LOGIN_PHONE_SELECTOR = "input[name='userNumber'], input[placeholder*='phone' i], input[type='tel'], input[type='number'].form-input, .form-input[placeholder*='phone' i]"
+LOGIN_PASS_SELECTOR = "input[type='password'], input.fake-password, input[placeholder*='password' i]"
+LOGIN_SUBMIT_SELECTOR = "button:has-text('Log in'), button:has-text('Login'), .signIn__container-button button, .login-btn, button[type='submit'], button.btn:has-text('Login')"
 
 CLOSE_SELECTORS = [
     ".first-recharge-queue-dialog__close",
     ".closeBtn",
     ".close-btn",
+    ".close",
+    ".ar_icon.tab-close-btn",
     ".van-icon-cross",
     ".van-icon-close",
     ".van-popup__close-icon",
@@ -115,11 +117,12 @@ class PlaywrightWinGoWorker:
 
     def __init__(self):
         self.enabled = True
-        self.login_url = (getattr(config, "DEMO_LOGIN_URL", "") or "").strip() or "https://bdgwina.biz/#/login"
-        self.username = (getattr(config, "DEMO_USERNAME", "") or "").strip() or "6556745550"
-        self.password = (getattr(config, "DEMO_PASSWORD", "") or "").strip() or "win1222"
+        self.login_url = (getattr(config, "DEMO_LOGIN_URL", "") or "").strip() or "https://maanwin44.com/login"
+        self.username = (getattr(config, "DEMO_USERNAME", "") or "").strip() or "91000246"
+        self.password = (getattr(config, "DEMO_PASSWORD", "") or "").strip() or "a123a123"
         self.headless = config.HEADLESS
         self.profile_dir = config.BROWSER_PROFILE_DIR
+        self.current_game_id = "wingo_1m"
 
         self.playwright = None
         self.context: Optional[BrowserContext] = None
@@ -133,6 +136,35 @@ class PlaywrightWinGoWorker:
         self.cached_win_screenshots: Dict[str, io.BytesIO] = {}
         self.cached_board_screenshots: Dict[str, io.BytesIO] = {}
         self.known_results: Dict[str, Dict[str, Any]] = {}
+
+    def refresh_credentials_from_db(self):
+        """Loads latest game link, username, and password from MongoDB / config."""
+        try:
+            from database import db_manager
+            db_url = db_manager.get_game_login_url()
+            db_user = db_manager.get_game_username()
+            db_pass = db_manager.get_game_password()
+            if db_url:
+                self.login_url = db_url.strip()
+            if db_user:
+                self.username = str(db_user).strip()
+            if db_pass:
+                self.password = str(db_pass).strip()
+        except Exception as e:
+            logger.debug(f"Could not refresh credentials from DB: {e}")
+
+    def _origin(self) -> str:
+        from urllib.parse import urlparse
+        raw = (self.login_url or "").strip()
+        if not raw.startswith(("http://", "https://")):
+            raw = "https://" + raw
+        parsed = urlparse(raw)
+        if parsed.scheme and parsed.netloc:
+            return f"{parsed.scheme}://{parsed.netloc}"
+        return "https://maanwin44.com"
+
+    def _is_hash_router(self) -> bool:
+        return "/#/" in (self.login_url or "")
 
     def _get_chromium_path(self) -> Optional[str]:
         if config.CHROMIUM_PATH and os.path.exists(config.CHROMIUM_PATH):
@@ -159,11 +191,35 @@ class PlaywrightWinGoWorker:
         return None
 
     def _home_url(self) -> str:
-        base = self.login_url.split("#", 1)[0].rstrip("/")
-        return f"{base}/#/"
+        origin = self._origin()
+        if self._is_hash_router():
+            return f"{origin}/#/"
+        return f"{origin}/"
 
-    def _get_game_url(self, game_id: str) -> str:
-        base_origin = self.login_url.split("/#/")[0] if "/#/" in self.login_url else "https://bdgwina.biz"
+    def _login_url_candidates(self) -> list:
+        origin = self._origin()
+        raw = (self.login_url or "").strip()
+        candidates = []
+        if "/#/" in raw:
+            candidates.append(f"{origin}/#/login")
+            candidates.append(f"{origin}/login")
+        elif "/register" in raw.lower():
+            # Never navigate to /register when logging in — always convert to /login
+            candidates.append(f"{origin}/login")
+            candidates.append(f"{origin}/#/login")
+        else:
+            if raw and "/register" not in raw.lower():
+                candidates.append(raw)
+            candidates.append(f"{origin}/login")
+            candidates.append(f"{origin}/#/login")
+        seen = []
+        for c in candidates:
+            if c and c not in seen:
+                seen.append(c)
+        return seen
+
+    def _get_game_url_candidates(self, game_id: str) -> list:
+        origin = self._origin()
         code_map = {
             "wingo_30s": "WinGo_30S",
             "wingo_1m": "WinGo_1M",
@@ -171,10 +227,18 @@ class PlaywrightWinGoWorker:
             "wingo_5m": "WinGo_5M",
         }
         game_code = code_map.get(game_id, "WinGo_1M")
-        return f"{base_origin}/#/saasLottery/WinGo?gameCode={game_code}&lottery=WinGo"
+        hash_url = f"{origin}/#/saasLottery/WinGo?gameCode={game_code}&lottery=WinGo"
+        history_url = f"{origin}/WinGo/{game_code}"
+        if self._is_hash_router():
+            return [hash_url, history_url]
+        return [history_url, hash_url]
+
+    def _get_game_url(self, game_id: str) -> str:
+        return self._get_game_url_candidates(game_id)[0]
 
     async def initialize(self) -> bool:
         """Launches Playwright persistent browser context and signs in like a real user"""
+        self.refresh_credentials_from_db()
         if not self.enabled or not self.username or not self.password:
             logger.info("ℹ️ Real game automation is disabled in config.")
             return False
@@ -225,7 +289,7 @@ class PlaywrightWinGoWorker:
                 self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
                 self.page.set_default_timeout(15000)
 
-                ok = await self.open_room_step_by_step("wingo_1m")
+                ok = await self.open_room_step_by_step(self.current_game_id or "wingo_1m")
                 if ok:
                     self.is_ready = True
                     logger.info("🎯 Real Browser is logged in and ready on WinGo game board!")
@@ -240,32 +304,34 @@ class PlaywrightWinGoWorker:
                 return False
 
     # ------------------------------------------------------------------ #
-    #  Real human-like login & popups (smex logic)
+    #  Real human-like login & popups (Universal across all WinGo skins)
     # ------------------------------------------------------------------ #
 
     async def is_logged_out(self) -> bool:
-        """Checks if session expired or user is logged out (smex logic)"""
+        """Checks if session expired or user is logged out across Hash and History routed platforms"""
         if not self.page:
             return True
         try:
             expired_toast = self.page.locator(".van-toast:has-text('expired'), .van-toast:has-text('login')").first
-            if await expired_toast.is_visible(timeout=500):
+            if await expired_toast.is_visible(timeout=400):
                 return True
 
-            curr = self.page.url or ""
-            if "#/login" in curr:
+            curr = (self.page.url or "").lower()
+            if "#/login" in curr or "/login" in curr or "/register" in curr:
                 return True
 
             phone_inp = self.page.locator(LOGIN_PHONE_SELECTOR).first
-            if await phone_inp.is_visible(timeout=500):
+            if await phone_inp.is_visible(timeout=400):
                 return True
 
             board = self.page.locator(PERIOD_SELECTOR).first
-            if await board.is_visible(timeout=500):
+            if await board.is_visible(timeout=400):
                 return False
 
-            guest_btn = self.page.locator(".p8-home__guest-btn--login, button:has-text('Log in')").first
-            if await guest_btn.is_visible(timeout=500):
+            guest_btn = self.page.locator(
+                ".p8-home__guest-btn--login, button:has-text('Log in'), button:has-text('Login')"
+            ).first
+            if await guest_btn.is_visible(timeout=400):
                 return True
         except Exception:
             pass
@@ -292,6 +358,14 @@ class PlaywrightWinGoWorker:
                     dialog.style.setProperty('display', 'none', 'important');
                     dialog.style.setProperty('visibility', 'hidden', 'important');
                     dialog.setAttribute('aria-hidden', 'true');
+                }
+                // Hide push notification prompt banners (e.g. "Get free spins & bonus alerts!")
+                const allDivs = document.querySelectorAll('div, section, aside');
+                for (const el of allDivs) {
+                    const txt = (el.innerText || '').trim();
+                    if (txt.includes('Get free spins') && txt.includes('Claim My Bonus') && el.offsetHeight < 260) {
+                        el.style.setProperty('display', 'none', 'important');
+                    }
                 }
                 document.body.classList.remove('van-overflow-hidden');
             }""")
@@ -361,20 +435,24 @@ class PlaywrightWinGoWorker:
             pass
 
     async def ensure_logged_in(self) -> bool:
-        """Enters phone and password like a real user and logs in"""
+        """Enters phone and password like a real user across any WinGo platform (/login, /#/login, /register)"""
         if not self.page:
             return False
 
-        logger.info(f"🔑 Authenticating account: Navigating to {self.login_url}...")
-        try:
-            await self.page.goto(self.login_url, wait_until="domcontentloaded", timeout=30000)
-            await asyncio.sleep(3.0)
-            await self.dismiss_announcements()
+        self.refresh_credentials_from_db()
+        candidates = self._login_url_candidates()
+        target_login = candidates[0] if candidates else self.login_url
 
-            curr = self.page.url or ""
-            if "#/main" in curr or "#/home" in curr or "#/saasLottery" in curr:
-                guest = self.page.locator(".p8-home__guest-btn--login, button:has-text('Log in')").first
-                if not await guest.is_visible():
+        logger.info(f"🔑 Authenticating account ({self.username}) on {target_login}...")
+        try:
+            await self.page.goto(target_login, wait_until="domcontentloaded", timeout=30000)
+            await asyncio.sleep(2.5)
+
+            curr = (self.page.url or "").lower()
+            if any(k in curr for k in ("#/main", "#/home", "#/saaslottery", "/wingo/")) or curr.rstrip("/") == self._origin().lower():
+                guest = self.page.locator(".p8-home__guest-btn--login, button:has-text('Log in'), button:has-text('Login')").first
+                phone_check = self.page.locator(LOGIN_PHONE_SELECTOR).first
+                if not await guest.is_visible(timeout=500) and not await phone_check.is_visible(timeout=500):
                     logger.info("✅ Already logged in with active user session!")
                     return True
 
@@ -382,38 +460,82 @@ class PlaywrightWinGoWorker:
             try:
                 await phone_field.wait_for(state="visible", timeout=8000)
             except Exception:
+                pass
+
+            for fallback_url in candidates[1:]:
+                if await phone_field.is_visible(timeout=1000) and "/register" not in (self.page.url or "").lower():
+                    break
+                try:
+                    logger.info(f"🔄 Trying fallback login URL: {fallback_url}...")
+                    await self.page.goto(fallback_url, wait_until="domcontentloaded", timeout=20000)
+                    try:
+                        await phone_field.wait_for(state="visible", timeout=6000)
+                    except Exception:
+                        pass
+                except Exception:
+                    continue
+
+            if not await phone_field.is_visible(timeout=1500):
                 phone_field = None
 
             if phone_field:
-                logger.info(f"👉 Entering Mobile Number: {self.username}...")
-                await phone_field.click()
-                await phone_field.fill("")
-                await phone_field.type(self.username, delay=35)
-                await asyncio.sleep(0.3)
-
-                pwd_field = self.page.locator(LOGIN_PASS_SELECTOR).first
-                if await pwd_field.is_visible():
-                    logger.info("👉 Entering Password...")
-                    await pwd_field.click()
-                    await pwd_field.fill("")
-                    await pwd_field.type(self.password, delay=35)
-                    await asyncio.sleep(0.4)
-
+                # Hide any stray overlay that might intercept clicks on the login page
                 try:
-                    rem_cb = self.page.locator(".signIn__container-rememberRow .van-checkbox, input[type='checkbox']").first
-                    if await rem_cb.is_visible():
-                        await rem_cb.click()
+                    await self.page.evaluate("""() => {
+                        document.querySelectorAll('.van-overlay').forEach(el => {
+                            el.style.setProperty('display', 'none', 'important');
+                            el.style.setProperty('pointer-events', 'none', 'important');
+                        });
+                    }""")
                 except Exception:
                     pass
 
-                submit = self.page.locator(LOGIN_SUBMIT_SELECTOR).first
-                if await submit.is_visible():
-                    logger.info("👉 Clicking Login button...")
-                    await submit.click()
-                    await asyncio.sleep(4.5)
+                logger.info(f"👉 Entering Mobile Number / ID: {self.username} on {self.page.url}...")
+                await phone_field.click(force=True)
+                await phone_field.fill(str(self.username))
+                await asyncio.sleep(0.3)
+
+                pwd_field = self.page.locator(LOGIN_PASS_SELECTOR).first
+                if await pwd_field.is_visible(timeout=2000):
+                    logger.info("👉 Entering Password...")
+                    await pwd_field.click(force=True)
+                    await pwd_field.fill(str(self.password))
+                    await asyncio.sleep(0.35)
+
+                # Ensure Remember / Agreement checkbox is checked without unchecking an already-checked box
+                try:
+                    await self.page.evaluate("""() => {
+                        const cb = document.querySelector(".signIn__container-rememberRow .van-checkbox, input.checkbox-input[type='checkbox']");
+                        if (!cb) return;
+                        if (cb.tagName === 'INPUT') {
+                            if (!cb.checked) cb.click();
+                        } else {
+                            const cls = cb.getAttribute('class') || '';
+                            const aria = cb.getAttribute('aria-checked');
+                            if (aria !== 'true' && !cls.includes('checked') && !cls.includes('active')) {
+                                cb.click();
+                            }
+                        }
+                    }""")
+                except Exception:
+                    pass
+
+                submit = self.page.locator(
+                    ".signIn__container-button button, button.btn, .login-btn, button[type='submit'], button"
+                ).filter(has_text=re.compile(r"^\s*Log\s*in\s*$", re.I)).first
+                if await submit.is_visible(timeout=2000):
+                    logger.info("👉 Clicking Login submit button...")
+                    await submit.click(force=True)
+                    # Wait up to 10s for the login API & SPA redirect off /login to finish completely
+                    for _ in range(20):
+                        await asyncio.sleep(0.5)
+                        curr_after = (self.page.url or "").lower()
+                        if "/login" not in curr_after and "#/login" not in curr_after:
+                            break
+                    await asyncio.sleep(2.0)
 
                 await self.dismiss_announcements()
-                logger.info("✅ Login form submitted successfully!")
+                logger.info(f"✅ Login submitted! Current URL: {self.page.url}")
                 return True
             else:
                 logger.info("ℹ️ Login input fields not present; proceeding with existing session...")
@@ -422,57 +544,130 @@ class PlaywrightWinGoWorker:
             logger.error(f"❌ Real login error: {e}", exc_info=True)
             return False
 
+    async def ensure_game_tab(self, game_id: str = "wingo_1m") -> bool:
+        """Selects the requested WinGo duration tab (30s, 1Min, 3Min, 5Min) across all WinGo themes"""
+        if not self.page:
+            return False
+        self.current_game_id = game_id
+        pattern_map = {
+            "wingo_30s": r"30\s*s",
+            "wingo_1m": r"1\s*m",
+            "wingo_3m": r"3\s*m",
+            "wingo_5m": r"5\s*m",
+        }
+        pat = pattern_map.get(game_id, r"1\s*m")
+        try:
+            tab = self.page.locator(GAME_ITEM_SELECTOR).filter(has_text=re.compile(pat, re.I)).first
+            if await tab.is_visible(timeout=1500):
+                cls = (await tab.get_attribute("class")) or ""
+                if "active" not in cls.lower():
+                    logger.info(f"🔀 Switching WinGo duration tab to {game_id}...")
+                    await tab.click(force=True)
+                    await asyncio.sleep(1.2)
+                return True
+        except Exception as e:
+            logger.debug(f"Tab switch check ({game_id}): {e}")
+        return False
+
     async def open_room_step_by_step(self, game_id: str = "wingo_1m") -> bool:
+        """
+        Universal 5-step room entry:
+        Works on both SPA-transfer sites (maanwin44.com where clicking Home -> WinGo transfers wallet via
+        /api/Home/CheckCanBet + /api/ThirdGame/Transfer) AND direct hash-routed sites (bdgwina.biz).
+        """
         if not self.page:
             return False
 
+        self.current_game_id = game_id
         logger.info("🧭 [1/5] Ensuring account is authenticated on game platform...")
         await self.ensure_logged_in()
 
-        logger.info("🧭 [2/5] Opening Home page...")
+        logger.info("🧭 [2/5] Opening Home page & syncing wallet...")
         try:
             home = self._home_url()
-            await self.page.goto(home, wait_until="domcontentloaded", timeout=25000)
-            await asyncio.sleep(2.0)
+            if (self.page.url or "").rstrip("/") != home.rstrip("/"):
+                await self.page.goto(home, wait_until="domcontentloaded", timeout=25000)
+            await asyncio.sleep(2.5)
             await self.dismiss_announcements()
             await self.setup_lottery_token()
         except Exception as e:
             logger.warning(f"Home page warning: {e}")
 
-        room_url = self._get_game_url(game_id)
-        logger.info(f"🧭 [3/5] Opening WinGo Room: {room_url}...")
+        logger.info("🧭 [3/5] Entering WinGo Room (SPA wallet transfer + URL fallback)...")
         try:
-            await self.page.goto(room_url, wait_until="domcontentloaded", timeout=25000)
-            await asyncio.sleep(3.0)
-            await self.dismiss_announcements()
-
             board_loc = self.page.locator(PERIOD_SELECTOR).first
-            if not await board_loc.is_visible(timeout=3000):
-                logger.info("👉 Clicking 'Lottery' icon from home screen...")
+            clicked_card = None
+
+            # Poll up to 6 seconds for home page WinGo card to render (required on ar_saas11 / MaanWin for wallet transfer)
+            for _ in range(12):
+                await self.dismiss_announcements()
+                clicked_card = await self.page.evaluate("""() => {
+                    const s11Play = document.querySelector('.s11-popular__scroller .s11-popular__play, .s11-popular__card .s11-popular__play');
+                    if (s11Play && s11Play.offsetWidth > 0) {
+                        s11Play.click();
+                        return 's11_popular_play';
+                    }
+                    const items = Array.from(document.querySelectorAll('div, a, button, li, span'));
+                    const wingoCard = items.find(el => {
+                        const t = (el.innerText || '').trim();
+                        return /^win\\s*go$/i.test(t) && el.offsetWidth > 0;
+                    });
+                    if (wingoCard) {
+                        wingoCard.click();
+                        return 'wingo_card';
+                    }
+                    return null;
+                }""")
+                if clicked_card:
+                    break
+                await asyncio.sleep(0.5)
+
+            if clicked_card:
+                logger.info(f"👉 Clicked home page WinGo card ({clicked_card}) — waiting for wallet transfer & board...")
+                for _ in range(20):
+                    if await board_loc.is_visible(timeout=400):
+                        bal_now = await self.read_balance()
+                        if bal_now is not None and bal_now > 0:
+                            break
+                    await asyncio.sleep(0.5)
+                await self.dismiss_announcements()
+
+            if not await board_loc.is_visible(timeout=2000):
+                for candidate_url in self._get_game_url_candidates(game_id):
+                    logger.info(f"👉 Navigating to WinGo candidate URL: {candidate_url}...")
+                    try:
+                        await self.page.goto(candidate_url, wait_until="domcontentloaded", timeout=25000)
+                        await asyncio.sleep(3.0)
+                        await self.dismiss_announcements()
+                        if await board_loc.is_visible(timeout=2500):
+                            break
+                    except Exception:
+                        continue
+
+            if not await board_loc.is_visible(timeout=2000):
+                logger.info("👉 Clicking 'Lottery' category icon from home screen...")
                 lottery_btn = self.page.locator("text='Lottery', [class*='Lottery']").first
                 if await lottery_btn.is_visible(timeout=2000):
                     await lottery_btn.click(force=True)
                     await asyncio.sleep(2.0)
-                    await self.page.goto(room_url, wait_until="domcontentloaded", timeout=20000)
+                    await self.page.goto(self._get_game_url(game_id), wait_until="domcontentloaded", timeout=20000)
                     await asyncio.sleep(2.5)
         except Exception as e:
             logger.warning(f"Room open warning: {e}")
 
-        logger.info("🧭 [4/5] Selecting WinGo 1Min tab...")
-        try:
-            tab = self.page.locator(GAME_ITEM_SELECTOR).filter(has_text=re.compile(r"1\s*Min", re.I)).first
-            if await tab.is_visible(timeout=1500):
-                await tab.click(force=True)
-                await asyncio.sleep(1.0)
-        except Exception:
-            pass
+        logger.info(f"🧭 [4/5] Selecting WinGo tab for {game_id}...")
+        await self.ensure_game_tab(game_id)
 
-        logger.info("🧭 [5/5] Checking WinGo board...")
+        logger.info("🧭 [5/5] Checking WinGo board & live balance...")
         try:
             board_loc = self.page.locator(PERIOD_SELECTOR).first
             if await board_loc.is_visible(timeout=4000):
                 period_text = (await board_loc.inner_text()).strip()
-                logger.info(f"✅ [5/5] WinGo Board Live & Ready! Current Period: {period_text}")
+                bal = await self.read_balance()
+                logger.info(
+                    f"✅ [5/5] WinGo Board Live & Ready! Current Period: {period_text} | "
+                    f"Balance: {f'₹{bal:,.2f}' if bal is not None else 'Unknown'}"
+                )
                 return True
         except Exception:
             pass
@@ -576,8 +771,8 @@ class PlaywrightWinGoWorker:
         number: Optional[int] = None
     ) -> bool:
         """
-        Injects the Zayro VIP Hack card directly into the live game page DOM at top: 14px!
-        Stays fixed at z-index 2147483647 right above the Congratulations popup (matching predction bot).
+        Injects the VIP Hack card (built-in or any custom uploaded .html file) directly into the live game page DOM at top: 14px!
+        Stays fixed at z-index 2147483647 right above the Congratulations popup and auto-adapts brand & winning outcome.
         """
         if not self.page:
             return False
@@ -587,16 +782,30 @@ class PlaywrightWinGoWorker:
                 await self.remove_prediction_overlay()
                 return False
 
-            from services.overlay_manager import overlay_manager, ZAYRO_CSS
-            card_html = overlay_manager.generate_html(
+            from services.overlay_manager import overlay_manager
+            brand_title = db_manager.get_overlay_brand_name()
+            payload = overlay_manager.generate_overlay_payload(
                 issue=issue,
                 choice=choice,
                 confidence=confidence,
                 level=level,
-                number=number
+                number=number,
+                brand_title=brand_title,
             )
 
-            await self.page.evaluate("""({html, css}) => {
+            choice_up = str(choice).upper()
+            if choice_up not in ("BIG", "SMALL"):
+                choice_up = "BIG" if (number is not None and int(number) >= 5) else "SMALL"
+            if number is None or not (0 <= int(number) <= 9):
+                number = 7 if choice_up == "BIG" else 2
+            else:
+                number = int(number)
+
+            color_label = "GREEN" if number in (1, 3, 7, 9) else ("VIOLET" if number in (0, 5) else "RED")
+            color_cls = "color-green" if number in (1, 3, 7, 9) else ("color-violet" if number in (0, 5) else "color-red")
+            ball_uri = overlay_manager.get_ball_b64(number)
+
+            await self.page.evaluate("""({html, css, issue, choiceUp, number, colorLabel, colorCls, ballUri, brandTitle}) => {
                 let style = document.getElementById('zayro-vip-overlay-style');
                 if (!style) {
                     style = document.createElement('style');
@@ -615,9 +824,51 @@ class PlaywrightWinGoWorker:
                 container.style.display = 'block';
                 container.style.visibility = 'visible';
                 container.style.opacity = '1';
-            }""", {"html": card_html, "css": ZAYRO_CSS})
 
-            logger.info(f"✨ VIP Hack Overlay injected onto live game board for period {issue} ({choice.upper()})!")
+                // Universal DOM adapter for custom uploaded HTML files
+                const waitEl = container.querySelector('#sv-wait, .state-waiting');
+                if (waitEl) waitEl.style.setProperty('display', 'none', 'important');
+                const resEl = container.querySelector('#sv-result, .state-result');
+                if (resEl) {
+                    resEl.classList.add('active');
+                    resEl.style.setProperty('display', 'flex', 'important');
+                    resEl.style.setProperty('opacity', '1', 'important');
+                    resEl.style.setProperty('visibility', 'visible', 'important');
+                }
+                const bsTxt = container.querySelector('#resBsText');
+                if (bsTxt) bsTxt.textContent = choiceUp;
+                const bsBadge = container.querySelector('#resBsBadge');
+                if (bsBadge) {
+                    bsBadge.classList.remove('badge-big', 'badge-small');
+                    bsBadge.classList.add(choiceUp === 'BIG' ? 'badge-big' : 'badge-small');
+                }
+                const numTxt = container.querySelector('#resNumText');
+                if (numTxt) numTxt.textContent = String(number);
+                const colPill = container.querySelector('#resColorPill');
+                if (colPill) {
+                    colPill.textContent = colorLabel;
+                    colPill.classList.remove('color-green', 'color-red', 'color-violet');
+                    colPill.classList.add(colorCls);
+                }
+                const ballImg = container.querySelector('#ballBgImg');
+                if (ballImg) ballImg.setAttribute('src', ballUri);
+                const perBot = container.querySelector('#res-period-bottom, #wait-period-top');
+                if (perBot) perBot.textContent = 'PERIOD: ' + String(issue);
+                const titleEl = container.querySelector('.card-title-line1');
+                if (titleEl && brandTitle) titleEl.textContent = brandTitle;
+            }""", {
+                "html": payload["html"],
+                "css": payload["css"],
+                "issue": str(issue),
+                "choiceUp": choice_up,
+                "number": number,
+                "colorLabel": color_label,
+                "colorCls": color_cls,
+                "ballUri": ball_uri,
+                "brandTitle": brand_title,
+            })
+
+            logger.info(f"✨ VIP Hack Overlay ({brand_title}) injected onto live game board for period {issue} ({choice_up} / {number})!")
             return True
         except Exception as e:
             logger.warning(f"Could not inject VIP overlay: {e}")
@@ -909,13 +1160,17 @@ class PlaywrightWinGoWorker:
         """
         Cleanly places a single bet on 'BIG' or 'SMALL':
         1. Ensures any previous bet popup is closed.
-        2. Clicks the Big/Small button on the board and waits for the bet popup to open (with retry).
+        2. Clicks the Big/Small button on the board (works on .Betting__C-foot-b/s AND .Betting__C-foot-big/small) and waits for popup.
         3. Ensures 'I agree' is checked and sets the bet amount.
         4. Clicks Confirm and waits for the bet popup to close naturally so the next bet never collides!
         """
         side_up = side.upper()
         is_big = (side_up == "BIG")
-        btn_selector = ".Betting__C-foot-b, .bet-btn-big" if is_big else ".Betting__C-foot-s, .bet-btn-small"
+        btn_selector = (
+            ".Betting__C-foot-b, .Betting__C-foot-big, .bet-btn-big"
+            if is_big
+            else ".Betting__C-foot-s, .Betting__C-foot-small, .bet-btn-small"
+        )
         target_label = "Big" if is_big else "Small"
 
         # 1. Clean up any leftover open modal from previous bet
@@ -935,7 +1190,7 @@ class PlaywrightWinGoWorker:
                         const el = document.querySelector(sel);
                         if (el) { el.click(); return; }
                         const all = Array.from(document.querySelectorAll("div, button, span"));
-                        const found = all.find(n => (n.innerText || '').trim() === label && n.children.length === 0);
+                        const found = all.find(n => (n.innerText || '').trim().toLowerCase() === label.toLowerCase() && n.children.length === 0);
                         if (found) found.click();
                     }""", {"sel": btn_selector, "label": target_label})
             except Exception:
@@ -951,6 +1206,10 @@ class PlaywrightWinGoWorker:
                 popup_opened = True
                 break
 
+            toast_now = await self._read_toast_text()
+            if toast_now and any(k in toast_now.lower() for k in ("expired", "login")):
+                logger.warning(f"🔑 Login/wallet session expired toast ({toast_now!r}) — re-syncing Home -> WinGo wallet...")
+                await self.open_room_step_by_step(self.current_game_id or "wingo_1m")
             await asyncio.sleep(0.25)
 
         if not popup_opened:
@@ -995,7 +1254,7 @@ class PlaywrightWinGoWorker:
         closed = await self._wait_bet_popup_closed(timeout_ms=3000)
         toast_msg = await self._read_toast_text()
 
-        if toast_msg and any(w in toast_msg.lower() for w in ("insufficient", "fail", "balance", "error")):
+        if toast_msg and any(w in toast_msg.lower() for w in ("insufficient", "fail", "balance", "error", "expired")):
             logger.error(f"💸 Game rejected {side_up} bet for {issue_number} — Toast: {toast_msg!r}")
             if not closed:
                 await self._force_close_bet_modal()
@@ -1036,6 +1295,9 @@ class PlaywrightWinGoWorker:
                 return {"ok": False, "reason": "browser_not_ready"}
 
             try:
+                if await self.is_logged_out():
+                    await self.open_room_step_by_step(game_id)
+                await self.ensure_game_tab(game_id)
                 await self.dismiss_announcements()
 
                 from database import db_manager
@@ -1098,6 +1360,7 @@ class PlaywrightWinGoWorker:
                     logger.info("🔑 Session logged out — re-authenticating...")
                     await self.open_room_step_by_step(game_id)
 
+                await self.ensure_game_tab(game_id)
                 await self.dismiss_announcements()
                 await self.remove_prediction_overlay()
 
@@ -1107,6 +1370,12 @@ class PlaywrightWinGoWorker:
                     bet_amount = 1
 
                 balance = await self.read_balance()
+                # If balance reads 0.00 on SPA-wallet sites (like MaanWin), re-sync via Home -> WinGo card once
+                if balance is not None and balance <= 0:
+                    logger.info("🔄 Balance shows ₹0.00 — syncing wallet via Home -> WinGo card...")
+                    await self.open_room_step_by_step(game_id)
+                    balance = await self.read_balance()
+
                 secs = await self.seconds_left()
                 on_page_period = await self.current_period()
                 logger.info(
@@ -1165,6 +1434,40 @@ class PlaywrightWinGoWorker:
             except Exception as e:
                 logger.error(f"Error placing dual bet for {game_id}: {e}", exc_info=True)
                 return {"ok": False, "reason": str(e)}
+
+    async def update_credentials_and_reconnect(
+        self,
+        login_url: Optional[str] = None,
+        username: Optional[str] = None,
+        password: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Saves new Game Link / ID / Password, wipes old browser session cookies/storage,
+        restarts Playwright, logs into the new platform, and returns live balance & period.
+        """
+        from database import db_manager
+        db_manager.set_game_credentials(login_url=login_url, username=username, password=password)
+        self.refresh_credentials_from_db()
+
+        await self.close()
+        try:
+            if os.path.exists(self.profile_dir):
+                shutil.rmtree(self.profile_dir, ignore_errors=True)
+        except Exception as e:
+            logger.debug(f"Could not clean profile dir on credential switch: {e}")
+
+        ok = await self.initialize()
+        bal = await self.read_balance() if ok else None
+        per = await self.current_period() if ok else None
+        brand = db_manager.get_overlay_brand_name()
+        return {
+            "ok": ok,
+            "balance": bal,
+            "period": per,
+            "url": self.login_url,
+            "username": self.username,
+            "brand": brand,
+        }
 
     async def capture_board_screenshot(self, game_id: str = "wingo_1m") -> Optional[io.BytesIO]:
         """Captures real clean screenshot of current game board and history table"""

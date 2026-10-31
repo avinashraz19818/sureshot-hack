@@ -104,6 +104,18 @@ class BetAutomationService:
         logger.warning(f"⚠️ No genuine Win Popup captured for period {target_issue}. Skipping screenshot delivery.")
         return None
 
+    async def update_credentials_and_reconnect(
+        self,
+        login_url: Optional[str] = None,
+        username: Optional[str] = None,
+        password: Optional[str] = None
+    ) -> dict:
+        return await self.worker.update_credentials_and_reconnect(
+            login_url=login_url,
+            username=username,
+            password=password
+        )
+
     async def close(self):
         await self.worker.close()
 

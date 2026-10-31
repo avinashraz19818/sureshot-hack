@@ -64,16 +64,15 @@ def get_admin_main_keyboard(
             InlineKeyboardButton("⚡ Signal, APK & Stickers Setup", callback_data="admin_hack_menu")
         ],
         [
-            InlineKeyboardButton(f"💰 Dual Bet: ₹{base_bet} on Big & ₹{base_bet} on Small", callback_data="admin_set_bet"),
-            InlineKeyboardButton(f"🎮 {browser_badge}", callback_data="admin_browser_status")
+            InlineKeyboardButton(f"💰 Dual Bet: ₹{base_bet} (Big & Small)", callback_data="admin_set_bet"),
+            InlineKeyboardButton(f"🎮 Game Login ({browser_badge})", callback_data="admin_browser_status")
         ],
         [
             InlineKeyboardButton(mode_text, callback_data="admin_toggle_mode"),
             InlineKeyboardButton("🕒 VIP Sessions", callback_data="admin_sessions")
         ],
         [
-            InlineKeyboardButton("📝 Edit ALL Message Templates", callback_data="admin_templates"),
-            InlineKeyboardButton(f"🎮 {browser_badge}", callback_data="admin_browser_status")
+            InlineKeyboardButton("📝 Edit ALL Message Templates", callback_data="admin_templates")
         ],
         [
             InlineKeyboardButton("📱 VIP APK & HTML Overlay", callback_data="admin_apk_overlay"),
@@ -140,6 +139,9 @@ def get_apk_overlay_keyboard(
         [
             InlineKeyboardButton(html_btn_label, callback_data="upload_html_prompt"),
             InlineKeyboardButton("🔄 Reset Default HTML", callback_data="reset_html_overlay")
+        ],
+        [
+            InlineKeyboardButton("🏷️ Change Hack Card Brand Title", callback_data="input_overlay_brand")
         ],
         [
             InlineKeyboardButton("◀️ Back to Admin Panel", callback_data="admin_refresh")
@@ -224,13 +226,22 @@ def get_single_session_keyboard(session_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(keyboard)
 
 def get_browser_status_keyboard() -> InlineKeyboardMarkup:
-    """Menu to inspect browser state and run manual test bet/screenshot"""
+    """Menu to configure Game Link, ID/Phone, Password, Hack Brand Title, and test live browser"""
     keyboard = [
         [
-            InlineKeyboardButton("🎯 Test Bet & Capture Screenshot", callback_data="browser_test_action")
+            InlineKeyboardButton("⚡ Quick Setup (Link + ID + Pass)", callback_data="input_game_quick_setup")
         ],
         [
-            InlineKeyboardButton("🔄 Reconnect Browser", callback_data="browser_reconnect")
+            InlineKeyboardButton("🔗 Change Game Link", callback_data="input_game_url"),
+            InlineKeyboardButton("📱 Change Phone / ID", callback_data="input_game_user")
+        ],
+        [
+            InlineKeyboardButton("🔑 Change Password", callback_data="input_game_pass"),
+            InlineKeyboardButton("🏷️ Hack Card Title", callback_data="input_overlay_brand")
+        ],
+        [
+            InlineKeyboardButton("📸 Live Board Preview (With Hack Card)", callback_data="browser_test_action"),
+            InlineKeyboardButton("🔄 Reconnect Game", callback_data="browser_reconnect")
         ],
         [
             InlineKeyboardButton("⬅️ Back to Admin", callback_data="admin_main")

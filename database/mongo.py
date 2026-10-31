@@ -417,6 +417,127 @@ class DatabaseManager:
         self.update_system_settings({"win_stickers": []})
         return []
 
+    # ================= DYNAMIC GAME LOGIN & PLATFORM CREDENTIALS =================
+
+    def get_game_login_url(self) -> str:
+        cfg = self.get_system_settings()
+        val = (cfg.get("game_login_url") or "").strip()
+        if val:
+            return val
+        return (getattr(config, "DEMO_LOGIN_URL", "") or "https://bdgwina.biz/#/login").strip()
+
+    def get_game_username(self) -> str:
+        cfg = self.get_system_settings()
+        val = (cfg.get("game_username") or "").strip()
+        if val:
+            return val
+        return (getattr(config, "DEMO_USERNAME", "") or "").strip()
+
+    def get_game_password(self) -> str:
+        cfg = self.get_system_settings()
+        val = (cfg.get("game_password") or "").strip()
+        if val:
+            return val
+        return (getattr(config, "DEMO_PASSWORD", "") or "").strip()
+
+    def get_overlay_brand_name(self) -> str:
+        cfg = self.get_system_settings()
+        custom_brand = (cfg.get("overlay_brand_name") or "").strip()
+        if custom_brand:
+            return custom_brand
+        url = self.get_game_login_url()
+        try:
+            from urllib.parse import urlparse
+            import re
+            host = (urlparse(url).hostname or "").lower()
+            host = re.sub(r"^(www\.|m\.|h5\.)", "", host)
+            domain_part = host.split(".")[0] if host else "vip"
+            m_prefix = re.match(r"^(\d+[a-zA-Z]+)", domain_part)
+            if m_prefix:
+                clean = m_prefix.group(1).capitalize()
+            else:
+                clean = re.sub(r"\d+$", "", domain_part) or domain_part
+                if clean.endswith("win") and len(clean) > 3:
+                    clean = clean[:-3].capitalize() + "Win"
+                elif clean.endswith("club") and len(clean) > 4:
+                    clean = clean[:-4].capitalize() + "Club"
+                elif clean.endswith("game") and len(clean) > 4:
+                    clean = clean[:-4].capitalize() + "Game"
+                else:
+                    clean = clean.capitalize()
+            return f"{clean} VIP Hack"
+        except Exception:
+            return "VIP SureShot Hack"
+
+    def set_overlay_brand_name(self, name: Optional[str]):
+        val = str(name).strip() if name and str(name).strip() else None
+        self.update_system_settings({"overlay_brand_name": val})
+
+    def set_game_credentials(self, login_url: Optional[str] = None, username: Optional[str] = None, password: Optional[str] = None) -> dict:
+        updates = {}
+        if login_url is not None and str(login_url).strip():
+            u = str(login_url).strip()
+            if not u.startswith("http"):
+                u = "https://" + u
+            updates["game_login_url"] = u
+            config.DEMO_LOGIN_URL = u
+        if username is not None and str(username).strip():
+            usr = str(username).strip()
+            updates["game_username"] = usr
+            config.DEMO_USERNAME = usr
+        if password is not None and str(password).strip():
+            pwd = str(password).strip()
+            updates["game_password"] = pwd
+            config.DEMO_PASSWORD = pwd
+        if updates:
+            self.update_system_settings(updates)
+            self._persist_env_credentials(
+                updates.get("game_login_url"),
+                updates.get("game_username"),
+                updates.get("game_password")
+            )
+        return {
+            "login_url": self.get_game_login_url(),
+            "username": self.get_game_username(),
+            "password": self.get_game_password(),
+            "brand": self.get_overlay_brand_name()
+        }
+
+    def _persist_env_credentials(self, login_url: Optional[str], username: Optional[str], password: Optional[str]):
+        """Also updates .env file on disk so credentials persist across restarts even without MongoDB"""
+        env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
+        try:
+            lines = []
+            if os.path.exists(env_path):
+                with open(env_path, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+            kv = {}
+            if login_url:
+                kv["DEMO_LOGIN_URL"] = login_url
+            if username:
+                kv["DEMO_USERNAME"] = username
+            if password:
+                kv["DEMO_PASSWORD"] = password
+            updated_keys = set()
+            new_lines = []
+            for line in lines:
+                matched = False
+                for k, v in kv.items():
+                    if line.strip().startswith(f"{k}="):
+                        new_lines.append(f"{k}={v}\n")
+                        updated_keys.add(k)
+                        matched = True
+                        break
+                if not matched:
+                    new_lines.append(line)
+            for k, v in kv.items():
+                if k not in updated_keys:
+                    new_lines.append(f"{k}={v}\n")
+            with open(env_path, "w", encoding="utf-8") as f:
+                f.writelines(new_lines)
+        except Exception as e:
+            logger.debug(f"Could not update .env file: {e}")
+
     def get_sessions(self) -> list:
         cfg = self.get_system_settings()
         return cfg.get("sessions", getattr(config, "DEFAULT_SESSIONS", []))
