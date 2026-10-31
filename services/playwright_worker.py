@@ -5,7 +5,7 @@ import time
 import shutil
 import asyncio
 import logging
-from typing import Optional, Dict
+from typing import Optional, Dict, Any
 from playwright.async_api import async_playwright, BrowserContext, Page
 
 import config
@@ -23,12 +23,13 @@ MOBILE_CONTEXT = {
 
 PERIOD_SELECTOR = ".TimeLeft__C-id"
 TIME_SELECTOR = ".TimeLeft__C-time"
-BALANCE_SELECTOR = ".Wallet__C-balance-l1"
+BALANCE_SELECTOR = ".Wallet__C-balance-l1, .Wallet__C-balance"
 GAME_ITEM_SELECTOR = ".GameList__C-item"
-BET_POPUP_SELECTOR = ".lottery-container, .Betting__Popup-body"
-BET_CONFIRM_SELECTOR = ".footer button.bet-amount, button.bet-amount, .Betting__Popup-foot-s, button:has-text('Total amount'), button:has-text('Confirm')"
-BET_AGREE_SELECTOR = ".agreement div[role='checkbox'], .agreement .van-checkbox, .Betting__Popup-agree"
-TOAST_FAIL_SELECTOR = ".van-toast--fail, .van-toast:has-text('insufficient'), .van-toast:has-text('fail'), .van-toast:has-text('parameter')"
+BET_POPUP_SELECTOR = ".Betting__Popup-body, .lottery-container"
+BET_CONFIRM_SELECTOR = ".Betting__Popup-foot-s, .footer button.bet-amount, button.bet-amount"
+BET_CANCEL_SELECTOR = ".Betting__Popup-foot-c, .footer button.cancel, button.cancel"
+BET_AGREE_SELECTOR = ".Betting__Popup-agree, .agreement div[role='checkbox'], .agreement .van-checkbox"
+TOAST_FAIL_SELECTOR = ".van-toast--fail, .van-toast:has-text('insufficient'), .van-toast:has-text('fail'), .van-toast:has-text('parameter'), .van-toast:has-text('balance')"
 WIN_DIALOG_SELECTOR = ".winning:not([style*='display: none']), .winning-body.isWin, .winning-wrap-l1.isWin, .WinningTip__C"
 
 LOGIN_PHONE_SELECTOR = "input[name='userNumber'], input[placeholder*='phone'], input[placeholder*='Phone'], input[type='tel']"
@@ -46,34 +47,70 @@ CLOSE_SELECTORS = [
     ".dialog__close",
     "img[src*='close']",
     "[class*='close-icon']",
-    "button:has-text('Confirm')",
-    "button:has-text('Close')",
+    "[class*='CloseBtn']",
+    ".activity-close",
 ]
 
-WIN_POPUP_JS = """() => {
-    const winEls = document.querySelectorAll(
-        '.winning, .winning-modal, .winning-wrap, .winning-body, .isWin, .WinningTip__C, .Winning-Popup, .win-popup, .van-popup, .van-dialog, [class*="winning"], [class*="congratul"], [class*="Popup"], [class*="dialog"]'
+DETECT_WIN_POPUP_JS = """() => {
+    const candidates = document.querySelectorAll(
+        '.WinningTip__C, .winning, .winning-body.isWin, .winning-wrap-l1.isWin, .van-dialog, .van-popup, .win-popup, .Winning-Popup'
     );
-    for (const el of winEls) {
+    for (const el of candidates) {
         if (!el || el.id === 'zayro-vip-overlay' || el.closest('#zayro-vip-overlay')) continue;
         const style = window.getComputedStyle(el);
-        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') continue;
+        if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity || '1') < 0.1) continue;
         const rect = el.getBoundingClientRect();
-        if (rect.width > 50 && rect.height > 50) {
-            const txt = (el.innerText || el.textContent || '').toLowerCase();
-            if (txt.includes('congratul') || txt.includes('bonus') || txt.includes('lottery result') || txt.includes('winning') || txt.includes('won') || el.classList.contains('isWin')) {
-                return true;
+        if (rect.width < 120 || rect.height < 120) continue;
+
+        const rawText = (el.innerText || el.textContent || '');
+        const txt = rawText.toLowerCase();
+
+        // Never match loss popup ("Sorry") or the open betting sheet ("Total amount")
+        if (txt.includes('sorry') || txt.includes('total amount')) continue;
+
+        const isWinClass = (
+            el.classList.contains('isWin') ||
+            !!el.querySelector('.isWin')
+        );
+        const hasCongrats = (
+            txt.includes('congratulations') ||
+            (txt.includes('bonus') && txt.includes('lottery results')) ||
+            (isWinClass && (txt.includes('bonus') || txt.includes('congratul')))
+        );
+
+        if (hasCongrats) {
+            let choice = null;
+            let num = null;
+            const m = rawText.match(/Lottery\\s*results[\\s\\S]{0,60}?([0-9])[\\s\\S]{0,30}?(Big|Small)/i);
+            if (m) {
+                num = parseInt(m[1], 10);
+                choice = m[2].toUpperCase();
+            } else {
+                const mNum = rawText.match(/Lottery\\s*results[\\s\\S]{0,40}?\\b([0-9])\\b/i);
+                if (mNum) {
+                    num = parseInt(mNum[1], 10);
+                    choice = num >= 5 ? 'BIG' : 'SMALL';
+                } else if (/\\bSmall\\b/i.test(rawText)) {
+                    choice = 'SMALL';
+                } else if (/\\bBig\\b/i.test(rawText)) {
+                    choice = 'BIG';
+                }
             }
+            return {
+                detected: true,
+                choice: choice,
+                number: num
+            };
         }
     }
-    return false;
+    return { detected: false, choice: null, number: null };
 }"""
 
 
 class PlaywrightWinGoWorker:
     """
     Playwright-based real human-like game player with instant 0-second popup capture (smex pattern).
-    Flow: Real Login -> Place Bet with Martingale Level -> Count Down Watcher -> Instant 80ms Win Popup Capture -> Telegram Delivery.
+    Flow: Real Login -> Place Dual Bet (Big + Small) -> Continuous Draw Watcher -> Instant Win Popup Capture -> Telegram Delivery.
     """
 
     def __init__(self):
@@ -89,10 +126,13 @@ class PlaywrightWinGoWorker:
         self.page: Optional[Page] = None
         self.is_ready = False
         self._lock = asyncio.Lock()
+        self._watcher_task: Optional[asyncio.Task] = None
+        self._popup_capture_in_progress = False
 
         # In-memory screenshot caches keyed by period string
         self.cached_win_screenshots: Dict[str, io.BytesIO] = {}
         self.cached_board_screenshots: Dict[str, io.BytesIO] = {}
+        self.known_results: Dict[str, Dict[str, Any]] = {}
 
     def _get_chromium_path(self) -> Optional[str]:
         if config.CHROMIUM_PATH and os.path.exists(config.CHROMIUM_PATH):
@@ -145,7 +185,6 @@ class PlaywrightWinGoWorker:
 
             try:
                 os.makedirs(self.profile_dir, exist_ok=True)
-                # Remove stale Chrome profile locks from previous killed runs
                 for lock_name in ["SingletonLock", "SingletonCookie", "SingletonSocket"]:
                     lock_path = os.path.join(self.profile_dir, lock_name)
                     if os.path.exists(lock_path) or os.path.islink(lock_path):
@@ -184,9 +223,8 @@ class PlaywrightWinGoWorker:
                 )
 
                 self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
-                self.page.set_default_timeout(25000)
+                self.page.set_default_timeout(15000)
 
-                # Execute Step-by-Step real user navigation from smex
                 ok = await self.open_room_step_by_step("wingo_1m")
                 if ok:
                     self.is_ready = True
@@ -211,7 +249,7 @@ class PlaywrightWinGoWorker:
             return True
         try:
             expired_toast = self.page.locator(".van-toast:has-text('expired'), .van-toast:has-text('login')").first
-            if await expired_toast.is_visible(timeout=700):
+            if await expired_toast.is_visible(timeout=500):
                 return True
 
             curr = self.page.url or ""
@@ -219,15 +257,15 @@ class PlaywrightWinGoWorker:
                 return True
 
             phone_inp = self.page.locator(LOGIN_PHONE_SELECTOR).first
-            if await phone_inp.is_visible(timeout=700):
+            if await phone_inp.is_visible(timeout=500):
                 return True
 
             board = self.page.locator(PERIOD_SELECTOR).first
-            if await board.is_visible(timeout=700):
+            if await board.is_visible(timeout=500):
                 return False
 
             guest_btn = self.page.locator(".p8-home__guest-btn--login, button:has-text('Log in')").first
-            if await guest_btn.is_visible(timeout=700):
+            if await guest_btn.is_visible(timeout=500):
                 return True
         except Exception:
             pass
@@ -241,14 +279,20 @@ class PlaywrightWinGoWorker:
             await self.page.evaluate(r"""() => {
                 const dialogs = [...document.querySelectorAll('div[role="dialog"]')];
                 for (const dialog of dialogs) {
-                    if (dialog.querySelector('input[autocomplete="new-password"]')) {
-                        dialog.style.setProperty('display', 'none', 'important');
-                        dialog.setAttribute('aria-hidden', 'true');
+                    if (!dialog.querySelector('input[autocomplete="new-password"]')) {
+                        continue;
                     }
+                    const buttons = [...dialog.querySelectorAll('button, [role="button"], .van-button')];
+                    const closeButton = buttons.find((button) =>
+                        /cancel|close|later|skip|not now|remind me later/i.test(
+                            (button.innerText || button.textContent || '').trim()
+                        )
+                    );
+                    if (closeButton) closeButton.click();
+                    dialog.style.setProperty('display', 'none', 'important');
+                    dialog.style.setProperty('visibility', 'hidden', 'important');
+                    dialog.setAttribute('aria-hidden', 'true');
                 }
-                document.querySelectorAll('.van-overlay').forEach(o => {
-                    o.style.setProperty('display', 'none', 'important');
-                });
                 document.body.classList.remove('van-overflow-hidden');
             }""")
         except Exception:
@@ -256,15 +300,38 @@ class PlaywrightWinGoWorker:
 
         for _ in range(4):
             clicked_any = False
+            try:
+                no_rem = self.page.locator("text='No more reminders today'").first
+                if await no_rem.is_visible(timeout=200):
+                    await no_rem.click(timeout=600)
+                    await asyncio.sleep(0.25)
+                    clicked_any = True
+            except Exception:
+                pass
+
             for sel in CLOSE_SELECTORS:
                 try:
                     locator = self.page.locator(sel).first
-                    if await locator.is_visible(timeout=250):
-                        await locator.click(force=True, timeout=500)
+                    if await locator.is_visible(timeout=200):
+                        await locator.click(force=True, timeout=600)
+                        await asyncio.sleep(0.25)
+                        clicked_any = True
+                        break
+                except Exception:
+                    continue
+
+            if not clicked_any:
+                try:
+                    confirm_el = self.page.locator(
+                        'div[role="dialog"]:not(:has(input[autocomplete="new-password"])) button'
+                    ).filter(has_text=re.compile(r"^\s*Confirm\s*$", re.I)).first
+                    if await confirm_el.is_visible(timeout=200):
+                        await confirm_el.click(timeout=800)
                         await asyncio.sleep(0.3)
                         clicked_any = True
                 except Exception:
-                    continue
+                    pass
+
             if not clicked_any:
                 break
 
@@ -304,7 +371,6 @@ class PlaywrightWinGoWorker:
             await asyncio.sleep(3.0)
             await self.dismiss_announcements()
 
-            # Check if page auto-redirected to home/main (already has valid session)
             curr = self.page.url or ""
             if "#/main" in curr or "#/home" in curr or "#/saasLottery" in curr:
                 guest = self.page.locator(".p8-home__guest-btn--login, button:has-text('Log in')").first
@@ -312,7 +378,6 @@ class PlaywrightWinGoWorker:
                     logger.info("✅ Already logged in with active user session!")
                     return True
 
-            # Locate phone input field
             phone_field = self.page.locator(LOGIN_PHONE_SELECTOR).first
             try:
                 await phone_field.wait_for(state="visible", timeout=8000)
@@ -334,7 +399,6 @@ class PlaywrightWinGoWorker:
                     await pwd_field.type(self.password, delay=35)
                     await asyncio.sleep(0.4)
 
-                # Remember me checkbox
                 try:
                     rem_cb = self.page.locator(".signIn__container-rememberRow .van-checkbox, input[type='checkbox']").first
                     if await rem_cb.is_visible():
@@ -342,7 +406,6 @@ class PlaywrightWinGoWorker:
                 except Exception:
                     pass
 
-                # Click Submit
                 submit = self.page.locator(LOGIN_SUBMIT_SELECTOR).first
                 if await submit.is_visible():
                     logger.info("👉 Clicking Login button...")
@@ -363,11 +426,9 @@ class PlaywrightWinGoWorker:
         if not self.page:
             return False
 
-        # Step 1: Login
         logger.info("🧭 [1/5] Ensuring account is authenticated on game platform...")
         await self.ensure_logged_in()
 
-        # Step 2: Home Page
         logger.info("🧭 [2/5] Opening Home page...")
         try:
             home = self._home_url()
@@ -378,7 +439,6 @@ class PlaywrightWinGoWorker:
         except Exception as e:
             logger.warning(f"Home page warning: {e}")
 
-        # Step 3: Open WinGo Room
         room_url = self._get_game_url(game_id)
         logger.info(f"🧭 [3/5] Opening WinGo Room: {room_url}...")
         try:
@@ -398,7 +458,6 @@ class PlaywrightWinGoWorker:
         except Exception as e:
             logger.warning(f"Room open warning: {e}")
 
-        # Step 4: Ensure WinGo Tab is selected
         logger.info("🧭 [4/5] Selecting WinGo 1Min tab...")
         try:
             tab = self.page.locator(GAME_ITEM_SELECTOR).filter(has_text=re.compile(r"1\s*Min", re.I)).first
@@ -408,7 +467,6 @@ class PlaywrightWinGoWorker:
         except Exception:
             pass
 
-        # Step 5: Check Period
         logger.info("🧭 [5/5] Checking WinGo board...")
         try:
             board_loc = self.page.locator(PERIOD_SELECTOR).first
@@ -423,33 +481,60 @@ class PlaywrightWinGoWorker:
         return True
 
     # ------------------------------------------------------------------ #
-    #  Timing, Live Countdown, and Fast Draw Watcher
+    #  Timing, Live Countdown, Balance, and Continuous Draw Watcher
     # ------------------------------------------------------------------ #
+
+    async def current_period(self) -> Optional[str]:
+        if not self.page:
+            return None
+        try:
+            loc = self.page.locator(PERIOD_SELECTOR).first
+            if await loc.is_visible(timeout=400):
+                txt = (await loc.inner_text(timeout=400)).strip()
+                digits = ''.join(filter(str.isdigit, txt))
+                return digits if digits else txt
+        except Exception:
+            pass
+        return None
+
+    async def read_balance(self) -> Optional[float]:
+        if not self.page:
+            return None
+        try:
+            loc = self.page.locator(BALANCE_SELECTOR).first
+            if await loc.is_visible(timeout=600):
+                txt = (await loc.inner_text(timeout=600)).strip()
+                nums = re.findall(r"\d[\d,]*(?:\.\d+)?", txt)
+                for n in nums:
+                    try:
+                        return float(n.replace(",", ""))
+                    except ValueError:
+                        continue
+        except Exception:
+            pass
+        return None
 
     @staticmethod
     def _parse_countdown(text: str) -> Optional[int]:
+        """Parse '0 0 : 1 3' / '0\n0\n:\n1\n3' / '00:13' style countdown into seconds (smex logic)."""
         if not text:
             return None
-        import re
-        # 1. Match spaced or standard mm:ss (e.g. '0 0 : 5 8' or '00:58')
-        m = re.search(r'(\d)\s*(\d)\s*[:：]\s*(\d)\s*(\d)', text)
-        if m:
-            mm = int(m.group(1)) * 10 + int(m.group(2))
-            ss = int(m.group(3)) * 10 + int(m.group(4))
-            val = mm * 60 + ss
-            return val if val <= 300 else None
-
-        # 2. Match standard mm:ss (e.g. '0:58' or '01:30')
-        m2 = re.search(r'(\d{1,2})\s*[:：]\s*(\d{2})', text)
-        if m2:
-            val = int(m2.group(1)) * 60 + int(m2.group(2))
-            return val if val <= 300 else None
-
-        # 3. Match pure 1-2 digits (e.g. '58' or '30')
         digits = ''.join(filter(str.isdigit, text))
-        if digits and len(digits) <= 2:
-            return int(digits)
-        return None
+        if not digits:
+            return None
+        if len(digits) >= 4:
+            mm = digits[-4:-2]
+            ss = digits[-2:]
+            try:
+                val = int(mm) * 60 + int(ss)
+                return val if val <= 300 else None
+            except ValueError:
+                return None
+        try:
+            val = int(digits)
+            return val if val <= 300 else None
+        except ValueError:
+            return None
 
     async def seconds_left(self) -> Optional[int]:
         """Reads the exact remaining seconds on the live board"""
@@ -457,19 +542,30 @@ class PlaywrightWinGoWorker:
             return None
         try:
             time_loc = self.page.locator(TIME_SELECTOR).first
-            if await time_loc.is_visible(timeout=500):
-                text = (await time_loc.inner_text()).strip()
+            if await time_loc.is_visible(timeout=400):
+                text = (await time_loc.inner_text(timeout=400)).strip()
                 parsed = self._parse_countdown(text)
                 if parsed is not None:
                     return parsed
 
             fallback_loc = self.page.locator(".van-count-down, .countDown, .time").first
-            if await fallback_loc.is_visible(timeout=500):
-                text = (await fallback_loc.inner_text()).strip()
+            if await fallback_loc.is_visible(timeout=400):
+                text = (await fallback_loc.inner_text(timeout=400)).strip()
                 return self._parse_countdown(text)
         except Exception:
             pass
         return None
+
+    async def remove_prediction_overlay(self):
+        if not self.page:
+            return
+        try:
+            await self.page.evaluate("""() => {
+                const el = document.getElementById('zayro-vip-overlay');
+                if (el) el.remove();
+            }""")
+        except Exception:
+            pass
 
     async def inject_prediction_overlay(
         self,
@@ -480,19 +576,15 @@ class PlaywrightWinGoWorker:
         number: Optional[int] = None
     ) -> bool:
         """
-        Injects the Zayro VIP Hack card directly into the live game page DOM!
-        Stays fixed at z-index 2147483647 above the live screen and winning popups,
-        so Playwright screenshots capture the genuine game with the VIP hack card.
+        Injects the Zayro VIP Hack card directly into the live game page DOM at top: 14px!
+        Stays fixed at z-index 2147483647 right above the Congratulations popup (matching predction bot).
         """
         if not self.page:
             return False
         try:
             from database import db_manager
             if not db_manager.get_html_overlay_enabled():
-                await self.page.evaluate("""() => {
-                    const el = document.getElementById('zayro-vip-overlay');
-                    if (el) el.remove();
-                }""")
+                await self.remove_prediction_overlay()
                 return False
 
             from services.overlay_manager import overlay_manager, ZAYRO_CSS
@@ -523,18 +615,6 @@ class PlaywrightWinGoWorker:
                 container.style.display = 'block';
                 container.style.visibility = 'visible';
                 container.style.opacity = '1';
-
-                // Dynamic popup docking: move overlay down touching or slightly overlapping popup
-                try {
-                    const popup = document.querySelector('.van-dialog, .van-popup, [class*="congratulation"], [class*="win-box"], [class*="Win-Popup"]');
-                    if (popup && popup.offsetParent !== null) {
-                        const rect = popup.getBoundingClientRect();
-                        const ovH = container.offsetHeight || 180;
-                        container.style.top = Math.max(40, Math.round(rect.top - ovH + 30)) + 'px';
-                    } else {
-                        container.style.top = '125px';
-                    }
-                } catch(e) {}
             }""", {"html": card_html, "css": ZAYRO_CSS})
 
             logger.info(f"✨ VIP Hack Overlay injected onto live game board for period {issue} ({choice.upper()})!")
@@ -553,12 +633,13 @@ class PlaywrightWinGoWorker:
         game_id: str = "wingo_1m"
     ):
         """
-        Runs right after placing bet!
-        Sleeps until countdown reaches 2s before draw, then runs an ultra-fast 50ms loop
-        to catch the real 'Congratulations' Winning Popup in the exact 3-second window!
-        If missed or unshown by site, immediately generates guaranteed authentic winning popup!
+        Continuous Period-Aware Win Popup Watcher:
+        - Never does a blind sleep that could oversleep the draw!
+        - Watches the live countdown & period flip continuously and polls DETECT_WIN_POPUP_JS at 50ms
+          to catch the real 'Congratulations' Winning Popup the instant it appears on screen!
+        - Extracts the actual winning outcome (BIG/SMALL & number) directly from the popup DOM
+          so the injected Zayro VIP Hack card matches the Congratulations popup 100%!
         """
-        secs = await self.seconds_left()
         max_sec = 60
         if "30s" in str(game_id):
             max_sec = 30
@@ -567,67 +648,198 @@ class PlaywrightWinGoWorker:
         elif "5m" in str(game_id):
             max_sec = 300
 
-        if secs is None or secs > max_sec:
-            secs = min(max_sec, 40)
+        secs = await self.seconds_left()
+        logger.info(
+            f"⏱️ Live Round Watcher started for period {target_issue} "
+            f"(Countdown: {secs if secs is not None else '?'}s remaining)..."
+        )
 
-        logger.info(f"⏱️ Live Round Watcher: {secs}s remaining until draw for period {target_issue}...")
+        overall_deadline = time.time() + max_sec + 16.0
+        post_flip_deadline: Optional[float] = None
+        entered_fast_mode = False
+        popup_info: Optional[Dict[str, Any]] = None
 
-        # Sleep until 2 seconds before the countdown hits 0
-        if secs > 3:
-            sleep_duration = max(1.0, secs - 2.5)
-            await asyncio.sleep(sleep_duration)
+        try:
+            while time.time() < overall_deadline:
+                # 1. Check if the Congratulations popup is currently visible on the DOM
+                try:
+                    res = await self.page.evaluate(DETECT_WIN_POPUP_JS)
+                    if res and res.get("detected"):
+                        popup_info = res
+                        break
+                except Exception:
+                    pass
 
-        logger.info(f"👀 Draw happening NOW for {target_issue}! Fast 50ms Win Popup detector active...")
+                # 2. Check board period & countdown to know when draw is imminent or happening
+                try:
+                    on_page_period = await self.current_period()
+                    curr_secs = await self.seconds_left()
 
-        # Ultra-fast polling at 50ms intervals
-        deadline = time.time() + 12.0
-        popup_detected = False
+                    # If period on board has flipped past target_issue, draw is happening RIGHT NOW!
+                    if on_page_period and str(target_issue) and on_page_period != str(target_issue):
+                        if post_flip_deadline is None:
+                            post_flip_deadline = time.time() + 11.0
+                            self._popup_capture_in_progress = True
+                            if not entered_fast_mode:
+                                entered_fast_mode = True
+                                logger.info(f"👀 Period flipped ({target_issue} -> {on_page_period})! Fast 50ms Win Popup detector active...")
 
-        while time.time() < deadline:
-            try:
-                is_win = await self.page.evaluate(WIN_POPUP_JS)
-                if is_win:
-                    popup_detected = True
+                    elif curr_secs is not None and curr_secs <= 4:
+                        self._popup_capture_in_progress = True
+                        if not entered_fast_mode:
+                            entered_fast_mode = True
+                            logger.info(f"👀 Draw imminent ({curr_secs}s left for {target_issue})! Fast 50ms Win Popup detector active...")
+                except Exception:
+                    pass
+
+                if post_flip_deadline is not None and time.time() > post_flip_deadline:
                     break
-            except Exception:
-                pass
-            await asyncio.sleep(0.05)
 
-        if popup_detected:
-            logger.info(f"🎉 REAL IN-GAME CONGRATULATIONS WIN POPUP DETECTED for {target_issue}! Capturing at once...")
-            # Ensure VIP Hack overlay is rendered on top of the Congratulations popup!
-            await self.inject_prediction_overlay(
-                issue=target_issue,
-                choice=choice,
-                confidence=confidence,
-                level=level,
-                number=number
-            )
-            await asyncio.sleep(0.18)  # Let bonus amount animation settle
-            try:
+                # Poll every 50ms during draw window, or every 250ms while waiting for countdown
+                await asyncio.sleep(0.05 if entered_fast_mode else 0.25)
+
+            if popup_info and popup_info.get("detected"):
+                # Resolve actual winning choice (BIG/SMALL) and number (0-9) for the VIP Hack card
+                known = self.known_results.get(str(target_issue), {})
+                detected_choice = popup_info.get("choice") or known.get("choice") or choice
+                detected_num = popup_info.get("number")
+                if detected_num is None:
+                    detected_num = known.get("number", number)
+
+                if str(detected_choice).upper() not in ("BIG", "SMALL"):
+                    if detected_num is not None:
+                        detected_choice = "BIG" if int(detected_num) >= 5 else "SMALL"
+                    else:
+                        detected_choice = "BIG"
+
+                logger.info(
+                    f"🎉 REAL IN-GAME CONGRATULATIONS WIN POPUP DETECTED for {target_issue} "
+                    f"({detected_choice} / {detected_num})! Capturing at once..."
+                )
+
+                await self.inject_prediction_overlay(
+                    issue=target_issue,
+                    choice=str(detected_choice).upper(),
+                    confidence=confidence,
+                    level=level,
+                    number=detected_num
+                )
+                await asyncio.sleep(0.18)  # Let bonus amount animation settle
+
                 shot_bytes = await self.page.screenshot(type="png", full_page=False)
                 buf = io.BytesIO(shot_bytes)
                 buf.seek(0)
                 self.cached_win_screenshots[str(target_issue)] = buf
                 logger.info(f"📸 100% Real In-Game Win Popup Screenshot with VIP Overlay cached for period {target_issue}!")
+
                 await self.dismiss_announcements()
+                await self.remove_prediction_overlay()
                 return
-            except Exception as e:
-                logger.error(f"Error taking popup screenshot: {e}")
-        else:
-            logger.warning(f"⚠️ Native Congratulations popup did not appear for {target_issue}. Check that the account has balance and bet was accepted.")
-            # Remove any injected overlay so board stays clean
-            try:
-                await self.page.evaluate("""() => {
-                    const el = document.getElementById('zayro-vip-overlay');
-                    if (el) el.remove();
-                }""")
-            except Exception:
-                pass
+            else:
+                logger.warning(
+                    f"⚠️ Native Congratulations popup did not appear for {target_issue}. "
+                    f"Check that the account has sufficient balance and bets were accepted."
+                )
+                await self.remove_prediction_overlay()
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error(f"Error in watch_and_capture_win_popup for {target_issue}: {e}")
+        finally:
+            self._popup_capture_in_progress = False
 
     # ------------------------------------------------------------------ #
-    #  Bet Amount & Multiplier Setter (smex logic)
+    #  Bet Modal Lifecycle Helpers (smex battle-tested logic)
     # ------------------------------------------------------------------ #
+
+    async def _is_bet_popup_open(self) -> bool:
+        if not self.page:
+            return False
+        try:
+            return await self.page.evaluate("""() => {
+                const els = document.querySelectorAll('.Betting__Popup-body, .lottery-container');
+                for (const el of els) {
+                    const st = window.getComputedStyle(el);
+                    if (st.display !== 'none' && st.visibility !== 'hidden' && el.offsetWidth > 0 && el.offsetHeight > 0) {
+                        return true;
+                    }
+                }
+                return false;
+            }""")
+        except Exception:
+            return False
+
+    async def _wait_bet_popup_open(self, timeout_ms: int = 2000) -> bool:
+        deadline = time.time() + (timeout_ms / 1000.0)
+        while time.time() < deadline:
+            if await self._is_bet_popup_open():
+                return True
+            await asyncio.sleep(0.06)
+        return False
+
+    async def _wait_bet_popup_closed(self, timeout_ms: int = 2500) -> bool:
+        deadline = time.time() + (timeout_ms / 1000.0)
+        while time.time() < deadline:
+            if not await self._is_bet_popup_open():
+                return True
+            await asyncio.sleep(0.06)
+        return False
+
+    async def _force_close_bet_modal(self):
+        """Cleanly closes any open betting sheet via Cancel button or overlay click."""
+        if not self.page:
+            return
+        try:
+            cancel = self.page.locator(BET_CANCEL_SELECTOR).first
+            if await cancel.is_visible(timeout=250):
+                await cancel.click(timeout=500)
+                await asyncio.sleep(0.2)
+                return
+        except Exception:
+            pass
+        try:
+            await self.page.evaluate("""() => {
+                const cancelBtn = document.querySelector('.Betting__Popup-foot-c, .footer button.cancel, button.cancel');
+                if (cancelBtn) { cancelBtn.click(); return; }
+                const ov = document.querySelector('.van-overlay');
+                if (ov) ov.click();
+            }""")
+            await asyncio.sleep(0.2)
+        except Exception:
+            pass
+
+    async def _ensure_bet_agreed(self):
+        """Ensures the 'I agree' checkbox on the betting popup is checked (never unchecks if already active)."""
+        if not self.page:
+            return
+        try:
+            await self.page.evaluate("""() => {
+                const agree = document.querySelector(".Betting__Popup-agree, .agreement div[role='checkbox'], .agreement .van-checkbox");
+                if (!agree) return;
+                if (agree.getAttribute('aria-checked') === 'true') return;
+                const cls = agree.getAttribute('class') || '';
+                if (cls.includes('active') || cls.includes('--checked')) return;
+                const icon = agree.querySelector('.van-checkbox__icon');
+                if (icon && (icon.getAttribute('class') || '').includes('--checked')) return;
+                agree.click();
+            }""")
+        except Exception:
+            pass
+
+    async def _read_toast_text(self) -> Optional[str]:
+        if not self.page:
+            return None
+        try:
+            txt = await self.page.evaluate("""() => {
+                const t = document.querySelector('.van-toast, .van-toast__text');
+                if (t && t.offsetWidth > 0) {
+                    return (t.innerText || t.textContent || '').trim();
+                }
+                return null;
+            }""")
+            return txt if txt else None
+        except Exception:
+            return None
 
     async def set_bet_amount(self, target_total: int):
         """Sets the exact bet chip and multiplier on the open WinGo betting sheet (smex logic)"""
@@ -663,7 +875,7 @@ class PlaywrightWinGoWorker:
         if qty in [1, 5, 10, 20, 50, 100]:
             try:
                 mult_clicked = await self.page.evaluate("""(q) => {
-                    const btns = Array.from(document.querySelectorAll('.multiplier-buttons > div, [class*="multiplier"] > div'));
+                    const btns = Array.from(document.querySelectorAll('.multiplier-buttons > div, [class*="multiplier"] > div, .Betting__Popup-body-line-item, .Betting__Popup-btn'));
                     const target = btns.find(b => b.textContent.trim().toUpperCase() === 'X' + q);
                     if (target) {
                         target.click();
@@ -693,8 +905,114 @@ class PlaywrightWinGoWorker:
             except Exception:
                 pass
 
+    async def _place_single_side_bet(self, side: str, bet_amount: int, issue_number: str) -> bool:
+        """
+        Cleanly places a single bet on 'BIG' or 'SMALL':
+        1. Ensures any previous bet popup is closed.
+        2. Clicks the Big/Small button on the board and waits for the bet popup to open (with retry).
+        3. Ensures 'I agree' is checked and sets the bet amount.
+        4. Clicks Confirm and waits for the bet popup to close naturally so the next bet never collides!
+        """
+        side_up = side.upper()
+        is_big = (side_up == "BIG")
+        btn_selector = ".Betting__C-foot-b, .bet-btn-big" if is_big else ".Betting__C-foot-s, .bet-btn-small"
+        target_label = "Big" if is_big else "Small"
+
+        # 1. Clean up any leftover open modal from previous bet
+        if await self._is_bet_popup_open():
+            await self._force_close_bet_modal()
+            await self._wait_bet_popup_closed(timeout_ms=1000)
+
+        # 2. Click Big / Small button and verify the popup opens (up to 3 attempts)
+        popup_opened = False
+        for attempt in range(3):
+            try:
+                loc = self.page.locator(btn_selector).first
+                if await loc.is_visible(timeout=1000):
+                    await loc.click(force=True, timeout=1200)
+                else:
+                    await self.page.evaluate("""({sel, label}) => {
+                        const el = document.querySelector(sel);
+                        if (el) { el.click(); return; }
+                        const all = Array.from(document.querySelectorAll("div, button, span"));
+                        const found = all.find(n => (n.innerText || '').trim() === label && n.children.length === 0);
+                        if (found) found.click();
+                    }""", {"sel": btn_selector, "label": target_label})
+            except Exception:
+                try:
+                    await self.page.evaluate("""(sel) => {
+                        const el = document.querySelector(sel);
+                        if (el) el.click();
+                    }""", btn_selector)
+                except Exception:
+                    pass
+
+            if await self._wait_bet_popup_open(timeout_ms=1600):
+                popup_opened = True
+                break
+
+            await asyncio.sleep(0.25)
+
+        if not popup_opened:
+            toast_msg = await self._read_toast_text()
+            logger.warning(
+                f"⚠️ Bet popup did not open for {side_up} on period {issue_number} "
+                f"(Toast: {toast_msg!r})"
+            )
+            return False
+
+        # 3. Ensure agreement checkbox & set bet amount
+        await self._ensure_bet_agreed()
+        await self.set_bet_amount(bet_amount)
+        await asyncio.sleep(0.2)
+
+        # 4. Click Confirm button inside the popup
+        confirmed = False
+        try:
+            conf_loc = self.page.locator(BET_CONFIRM_SELECTOR).first
+            if await conf_loc.is_visible(timeout=1000):
+                await conf_loc.click(force=True, timeout=1000)
+                confirmed = True
+        except Exception:
+            confirmed = False
+
+        if not confirmed:
+            try:
+                confirmed = await self.page.evaluate("""() => {
+                    const btn = document.querySelector(".Betting__Popup-foot-s, .footer button.bet-amount, button.bet-amount");
+                    if (btn) { btn.click(); return true; }
+                    return false;
+                }""")
+            except Exception:
+                confirmed = False
+
+        if not confirmed:
+            logger.warning(f"⚠️ Could not click Confirm button for {side_up} on period {issue_number}!")
+            await self._force_close_bet_modal()
+            return False
+
+        # 5. Wait for the popup to close naturally after server response
+        closed = await self._wait_bet_popup_closed(timeout_ms=3000)
+        toast_msg = await self._read_toast_text()
+
+        if toast_msg and any(w in toast_msg.lower() for w in ("insufficient", "fail", "balance", "error")):
+            logger.error(f"💸 Game rejected {side_up} bet for {issue_number} — Toast: {toast_msg!r}")
+            if not closed:
+                await self._force_close_bet_modal()
+            return False
+
+        if not closed:
+            await self._force_close_bet_modal()
+            await self._wait_bet_popup_closed(timeout_ms=1000)
+
+        logger.info(
+            f"✅ Bet placed on {side_up} (₹{bet_amount}) for period {issue_number}"
+            + (f" [Toast: {toast_msg}]" if toast_msg else "")
+        )
+        return True
+
     # ------------------------------------------------------------------ #
-    #  Real Bet Placement with Level-wise Martingale Sizing
+    #  Single & Dual Bet Placement
     # ------------------------------------------------------------------ #
 
     async def place_bet(
@@ -706,10 +1024,12 @@ class PlaywrightWinGoWorker:
         confidence: float = 98.7,
         number: Optional[int] = None
     ) -> dict:
-        """
-        Places real bet on Big or Small (or number ball) on the live game board,
-        applies Martingale multiplier (e.g. 2X/3X per level) and starts the draw watcher!
-        """
+        """Places a single real bet on Big or Small and starts the draw watcher."""
+        for _ in range(40):
+            if not self._popup_capture_in_progress:
+                break
+            await asyncio.sleep(0.2)
+
         async with self._lock:
             if not self.is_ready or not self.page:
                 logger.warning("Browser not ready for bet.")
@@ -718,48 +1038,13 @@ class PlaywrightWinGoWorker:
             try:
                 await self.dismiss_announcements()
 
-                target_text = "Big" if choice.upper() == "BIG" else "Small"
-                target_locator = self.page.locator(
-                    f"button:has-text('{target_text}'), div:has-text('{target_text}'):not(:has(div)), .Betting__C-foot-b, .bet-btn-big"
-                    if choice.upper() == "BIG"
-                    else f"button:has-text('{target_text}'), div:has-text('{target_text}'):not(:has(div)), .Betting__C-foot-s, .bet-btn-small"
-                ).first
-
-                clicked = False
-                if await target_locator.is_visible(timeout=3000):
-                    await target_locator.click(force=True)
-                    clicked = True
-                else:
-                    ball_num = "7" if choice.upper() == "BIG" else "2"
-                    num_ball = self.page.locator(f".Betting__C-numC-item{ball_num}, [class*='numC-item{ball_num}']").first
-                    if await num_ball.is_visible(timeout=2500):
-                        await num_ball.click(force=True)
-                        clicked = True
-
-                if not clicked:
-                    logger.warning(f"Could not click bet selector for {choice.upper()}.")
-                    return {"ok": False, "reason": "selector_missing"}
-
-                await asyncio.sleep(0.5)
-
-                # Calculate Martingale Bet Amount
                 from database import db_manager
                 base_bet = db_manager.get_base_bet_amount()
                 martingale_mult = db_manager.get_martingale_multiplier()
                 target_amount = base_bet * (martingale_mult ** max(0, level - 1))
 
-                # Apply Amount & Multiplier on sheet
-                await self.set_bet_amount(target_amount)
-                await asyncio.sleep(0.3)
-
-                # Confirm Bet Modal
-                confirm_btn = self.page.locator(BET_CONFIRM_SELECTOR).first
-                if await confirm_btn.is_visible(timeout=3000):
-                    await confirm_btn.click()
-                    logger.info(f"✅ Real in-game bet placed on {choice.upper()} for period {issue_number} (Level {level} -> ₹{target_amount})!")
-                    await asyncio.sleep(0.4)
-
-                    # Inject floating VIP Hack overlay onto the game screen immediately
+                ok = await self._place_single_side_bet(choice.upper(), target_amount, issue_number)
+                if ok:
                     await self.inject_prediction_overlay(
                         issue=issue_number,
                         choice=choice,
@@ -767,9 +1052,9 @@ class PlaywrightWinGoWorker:
                         level=level,
                         number=number
                     )
-
-                    # START THE REAL-TIME DRAW WATCHER IMMEDIATELY!
-                    asyncio.create_task(self.watch_and_capture_win_popup(
+                    if self._watcher_task and not self._watcher_task.done():
+                        self._watcher_task.cancel()
+                    self._watcher_task = asyncio.create_task(self.watch_and_capture_win_popup(
                         target_issue=str(issue_number),
                         choice=choice,
                         level=level,
@@ -777,12 +1062,8 @@ class PlaywrightWinGoWorker:
                         number=number,
                         game_id=game_id
                     ))
-
                     return {"ok": True, "choice": choice.upper(), "issue": issue_number, "amount": target_amount}
-                else:
-                    logger.warning("Bet confirm button not found.")
-                    return {"ok": False, "reason": "confirm_button_missing"}
-
+                return {"ok": False, "reason": "bet_failed"}
             except Exception as e:
                 logger.error(f"Error placing bet for {game_id}: {e}")
                 return {"ok": False, "reason": str(e)}
@@ -796,135 +1077,93 @@ class PlaywrightWinGoWorker:
     ) -> dict:
         """
         Sure-Shot Hack Mode:
-        Places real in-game bets on BOTH Big AND Small with the configured amount.
-        Guarantees that ONE outcome will win, triggering the real Congratulations Win popup!
+        Places real in-game flat bets on BOTH Big AND Small sequentially, waiting for the
+        first bet popup to close completely before opening the second bet popup.
+        Guarantees one outcome wins and triggers the real Congratulations Win popup!
         """
+        # Never interrupt an active 00:00 Congratulations popup capture from the just-finished round!
+        for _ in range(40):
+            if not self._popup_capture_in_progress:
+                break
+            await asyncio.sleep(0.2)
+
         async with self._lock:
             if not self.is_ready or not self.page:
                 logger.warning("Browser not ready for dual bet.")
                 return {"ok": False, "reason": "browser_not_ready"}
 
             try:
+                # Auto-recover if logged out or off the WinGo board
+                if await self.is_logged_out():
+                    logger.info("🔑 Session logged out — re-authenticating...")
+                    await self.open_room_step_by_step(game_id)
+
                 await self.dismiss_announcements()
+                await self.remove_prediction_overlay()
 
                 from database import db_manager
                 bet_amount = amount if amount is not None else db_manager.get_base_bet_amount()
                 if bet_amount <= 0:
-                    bet_amount = 10
+                    bet_amount = 1
 
-                logger.info(f"⚡ Placing DUAL BET (Big AND Small) of ₹{bet_amount} each for period {issue_number}...")
-
-                # 1. Place Bet on BIG
-                logger.info(f"⚡ [1/2] Clicking BIG for period {issue_number}...")
-                big_clicked = False
-                try:
-                    big_loc = self.page.locator(
-                        ".Betting__C-foot-b, .bet-btn-big, button:has-text('Big'), [class*='foot-b']"
-                    ).first
-                    await big_loc.wait_for(state="visible", timeout=3500)
-                    await big_loc.click(force=True)
-                    big_clicked = True
-                except Exception:
-                    big_clicked = await self.page.evaluate("""() => {
-                        const b = document.querySelector(".Betting__C-foot-b, .bet-btn-big, [class*='foot-b']");
-                        if (b) { b.click(); return true; }
-                        const all = Array.from(document.querySelectorAll("button, div, span"));
-                        const target = all.find(el => el.innerText && el.innerText.trim() === 'Big' && el.children.length === 0);
-                        if (target) { target.click(); return true; }
-                        return false;
-                    }""")
-
-                if big_clicked:
-                    await asyncio.sleep(0.4)
-                    await self.set_bet_amount(bet_amount)
-                    await asyncio.sleep(0.3)
-                    try:
-                        conf_loc = self.page.locator(BET_CONFIRM_SELECTOR).first
-                        await conf_loc.wait_for(state="visible", timeout=3000)
-                        await conf_loc.click()
-                        logger.info(f"✅ Bet 1/2 placed: BIG ₹{bet_amount} for {issue_number}")
-                    except Exception:
-                        await self.page.evaluate("""() => {
-                            const btn = document.querySelector(".footer button.bet-amount, button.bet-amount, .Betting__Popup-foot-s, .van-button--danger, .van-button--primary");
-                            if (btn) { btn.click(); return; }
-                            const all = Array.from(document.querySelectorAll("button, .van-button, div"));
-                            const conf = all.find(b => {
-                                const t = (b.innerText || b.textContent || '');
-                                return t.includes('Total amount') || t.includes('Confirm') || t.includes('Bet');
-                            });
-                            if (conf) conf.click();
-                        }""")
-                        logger.info(f"✅ Bet 1/2 placed (JS): BIG ₹{bet_amount} for {issue_number}")
-                    await asyncio.sleep(0.6)
-                else:
-                    logger.warning(f"⚠️ Could not click BIG button for period {issue_number}!")
-
-                # 2. Place Bet on SMALL
-                logger.info(f"⚡ [2/2] Clicking SMALL for period {issue_number}...")
-                small_clicked = False
-                try:
-                    small_loc = self.page.locator(
-                        ".Betting__C-foot-s, .bet-btn-small, button:has-text('Small'), [class*='foot-s']"
-                    ).first
-                    await small_loc.wait_for(state="visible", timeout=3500)
-                    await small_loc.click(force=True)
-                    small_clicked = True
-                except Exception:
-                    small_clicked = await self.page.evaluate("""() => {
-                        const b = document.querySelector(".Betting__C-foot-s, .bet-btn-small, [class*='foot-s']");
-                        if (b) { b.click(); return true; }
-                        const all = Array.from(document.querySelectorAll("button, div, span"));
-                        const target = all.find(el => el.innerText && el.innerText.trim() === 'Small' && el.children.length === 0);
-                        if (target) { target.click(); return true; }
-                        return false;
-                    }""")
-
-                if small_clicked:
-                    await asyncio.sleep(0.4)
-                    await self.set_bet_amount(bet_amount)
-                    await asyncio.sleep(0.3)
-                    try:
-                        conf_loc = self.page.locator(BET_CONFIRM_SELECTOR).first
-                        await conf_loc.wait_for(state="visible", timeout=3000)
-                        await conf_loc.click()
-                        logger.info(f"✅ Bet 2/2 placed: SMALL ₹{bet_amount} for {issue_number}")
-                    except Exception:
-                        await self.page.evaluate("""() => {
-                            const btn = document.querySelector(".footer button.bet-amount, button.bet-amount, .Betting__Popup-foot-s, .van-button--danger, .van-button--primary");
-                            if (btn) { btn.click(); return; }
-                            const all = Array.from(document.querySelectorAll("button, .van-button, div"));
-                            const conf = all.find(b => {
-                                const t = (b.innerText || b.textContent || '');
-                                return t.includes('Total amount') || t.includes('Confirm') || t.includes('Bet');
-                            });
-                            if (conf) conf.click();
-                        }""")
-                        logger.info(f"✅ Bet 2/2 placed (JS): SMALL ₹{bet_amount} for {issue_number}")
-                    await asyncio.sleep(0.5)
-                else:
-                    logger.warning(f"⚠️ Could not click SMALL button for period {issue_number}!")
-
-                # Inject floating VIP Hack overlay docked to popup location
-                await self.inject_prediction_overlay(
-                    issue=issue_number,
-                    choice="CONFIRMED",
-                    confidence=confidence,
-                    level=1
+                balance = await self.read_balance()
+                secs = await self.seconds_left()
+                on_page_period = await self.current_period()
+                logger.info(
+                    f"⚡ Dual Bet Prep | Target Period: {issue_number} (Board: {on_page_period or '?'}) | "
+                    f"Time Left: {secs if secs is not None else '?'}s | "
+                    f"Wallet Balance: {f'₹{balance:,.2f}' if balance is not None else 'Unknown'} | "
+                    f"Bet: ₹{bet_amount} on BIG + ₹{bet_amount} on SMALL"
                 )
 
-                # Start draw watcher - guaranteed win will be caught!
-                asyncio.create_task(self.watch_and_capture_win_popup(
+                if balance is not None and balance < (bet_amount * 2):
+                    logger.error(
+                        f"💸 Wallet balance (₹{balance:.2f}) is less than required dual bet (₹{bet_amount * 2})! "
+                        f"Please top up the game account so bets succeed and Congratulations popup appears."
+                    )
+
+                if secs is not None and secs <= 6:
+                    logger.warning(f"⏰ Only {secs}s left in period {issue_number} (draw lock active). Skipping bet click.")
+                    return {"ok": False, "reason": "period_locked"}
+
+                # 1. Place Bet on BIG and wait for modal to close completely
+                logger.info(f"⚡ [1/2] Placing BIG ₹{bet_amount} for period {issue_number}...")
+                big_ok = await self._place_single_side_bet("BIG", bet_amount, issue_number)
+
+                # Settle pause so Vant toast/overlay transition finishes cleanly before Bet 2
+                await asyncio.sleep(0.45)
+
+                # 2. Place Bet on SMALL and wait for modal to close completely
+                logger.info(f"⚡ [2/2] Placing SMALL ₹{bet_amount} for period {issue_number}...")
+                small_ok = await self._place_single_side_bet("SMALL", bet_amount, issue_number)
+
+                if not big_ok and not small_ok:
+                    logger.warning(f"⚠️ Neither BIG nor SMALL bet could be confirmed for {issue_number}!")
+                    return {"ok": False, "reason": "both_bets_failed"}
+
+                # Start continuous draw watcher right away!
+                if self._watcher_task and not self._watcher_task.done():
+                    self._watcher_task.cancel()
+
+                self._watcher_task = asyncio.create_task(self.watch_and_capture_win_popup(
                     target_issue=str(issue_number),
-                    choice="CONFIRMED",
+                    choice="BIG",
                     level=1,
                     confidence=confidence,
                     game_id=game_id
                 ))
 
-                return {"ok": True, "dual_bet": True, "issue": issue_number, "amount": bet_amount}
+                return {
+                    "ok": True,
+                    "dual_bet": True,
+                    "big_ok": big_ok,
+                    "small_ok": small_ok,
+                    "issue": issue_number,
+                    "amount": bet_amount
+                }
 
             except Exception as e:
-                logger.error(f"Error placing dual bet for {game_id}: {e}")
+                logger.error(f"Error placing dual bet for {game_id}: {e}", exc_info=True)
                 return {"ok": False, "reason": str(e)}
 
     async def capture_board_screenshot(self, game_id: str = "wingo_1m") -> Optional[io.BytesIO]:
@@ -943,6 +1182,8 @@ class PlaywrightWinGoWorker:
     async def close(self):
         """Safely shuts down browser context and Playwright process"""
         try:
+            if self._watcher_task and not self._watcher_task.done():
+                self._watcher_task.cancel()
             if self.context:
                 await self.context.close()
                 self.context = None

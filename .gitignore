@@ -14,3 +14,5 @@ repo.zip
 ai_pattern_model.pkl
 *.bak
 *.png
+
+browser_profile/

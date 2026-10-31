@@ -7,11 +7,12 @@ from services.playwright_worker import playwright_worker
 
 logger = logging.getLogger(__name__)
 
+
 class BetAutomationService:
     """
     Playwright Real Game Automation Service:
     - Real bet placement on live game board (WinGo).
-    - Synchronized countdown watcher catches the 3-second 'Congratulations' popup right at 00:00 draw.
+    - Continuous period-aware watcher catches the 3-second 'Congratulations' popup right at 00:00 draw.
     - Zero delay, zero fake drawings.
     """
 
@@ -74,11 +75,16 @@ class BetAutomationService:
     ) -> Optional[io.BytesIO]:
         """
         Retrieves the 100% genuine in-game screenshot captured right at the draw time:
-        1. Checks real-time draw watcher cache (captured right at 00:00).
-        2. Delivers the instant winning popup screenshot.
-        3. Never sends fake drawings.
+        1. Records actual winning choice & number so watcher can inject matching VIP card if still capturing.
+        2. Checks real-time draw watcher cache (captured right at 00:00).
+        3. Polls up to 7.5s while the browser finishes rendering & capturing the Congratulations popup.
+        4. Never sends fake drawings or bare board screenshots.
         """
         target_key = str(target_issue)
+        self.worker.known_results[target_key] = {
+            "choice": str(choice).upper(),
+            "number": actual_number
+        }
 
         # 1. Check if the real-time draw watcher already captured the winning popup
         shot = self.worker.cached_win_screenshots.pop(target_key, None)
@@ -86,9 +92,9 @@ class BetAutomationService:
             logger.info(f"📸 Delivering instant live Win Popup screenshot for period {target_issue}!")
             return shot
 
-        # 2. Wait up to 2.5s in case draw watcher is just finishing its 00:00 capture
-        for _ in range(5):
-            await asyncio.sleep(0.5)
+        # 2. Wait up to 7.5s (30 x 0.25s) while draw watcher catches the 00:00 Congratulations popup
+        for _ in range(30):
+            await asyncio.sleep(0.25)
             shot = self.worker.cached_win_screenshots.pop(target_key, None)
             if shot:
                 logger.info(f"📸 Delivering live Win Popup screenshot for period {target_issue}!")
@@ -100,5 +106,6 @@ class BetAutomationService:
 
     async def close(self):
         await self.worker.close()
+
 
 bet_automation = BetAutomationService()

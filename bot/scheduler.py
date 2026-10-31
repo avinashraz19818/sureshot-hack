@@ -606,11 +606,18 @@ class WinGoScheduler:
                         is_hack_mode = db_manager.is_hack_strategy()
 
                         if is_hack_mode:
+                            if not bet_automation.is_logged_in:
+                                logger.info("Playwright browser not ready yet, initializing before starting round...")
+                                await bet_automation.initialize()
+                                fresh_hist = await lottery_api.fetch_history(game_id)
+                                if fresh_hist and len(fresh_hist) >= 2:
+                                    latest_issue = str(fresh_hist[0]["issueNumber"])
+                                    next_issue = lottery_api.get_next_issue(latest_issue)
+
                             logger.info(f"[{game_name}] 🔥 SureShot Hack Active for {next_issue}! Placing Dual Bet on Big & Small...")
                             async def _do_dual_bet(gid, iss):
                                 try:
                                     if not bet_automation.is_logged_in:
-                                        logger.info("Playwright browser not ready yet, auto-initializing...")
                                         await bet_automation.initialize()
                                     if bet_automation.is_logged_in:
                                         await bet_automation.place_dual_bet(game_id=gid, issue_number=iss)
@@ -739,6 +746,26 @@ class WinGoScheduler:
         if is_hack_mode:
             is_win = True  # Dual bet guarantees a win every single round!
 
+        screenshot_bytes = None
+        if is_win:
+            try:
+                screenshot_stream = await asyncio.wait_for(
+                    bet_automation.capture_win_screenshot(
+                        game_id=game_id,
+                        target_issue=issue_number,
+                        choice=actual_choice,
+                        actual_number=actual_number,
+                        level=1,
+                        streak=1
+                    ),
+                    timeout=10.5
+                )
+                if screenshot_stream:
+                    screenshot_bytes = screenshot_stream.getvalue()
+            except (asyncio.TimeoutError, Exception) as s_err:
+                logger.warning(f"Screenshot delivery fallback: {s_err}")
+                screenshot_bytes = None
+
         for ch in channels:
             channel_id = ch["channel_id"]
             curr_level = ch.get("current_level", 1)
@@ -762,30 +789,12 @@ class WinGoScheduler:
                             except Exception:
                                 pass
 
-                    # Real Playwright screenshot of the actual Congratulations popup with 8.5s timeout
-                    try:
-                        screenshot_stream = await asyncio.wait_for(
-                            bet_automation.capture_win_screenshot(
-                                game_id=game_id,
-                                target_issue=issue_number,
-                                choice=actual_choice,
-                                actual_number=actual_number,
-                                level=curr_level,
-                                streak=streak
-                            ),
-                            timeout=8.5
-                        )
-                    except (asyncio.TimeoutError, Exception) as s_err:
-                        logger.warning(f"Screenshot delivery fallback: {s_err}")
-                        screenshot_stream = None
-
                     if is_hack_mode:
                         # SureShot Hack Mode:
                         # Caption: if set, send with caption; if blank/None, send ONLY raw photo!
                         hack_caption = db_manager.get_hack_win_caption() or ""
-                        if screenshot_stream:
-                            raw_bytes = screenshot_stream.getvalue()
-                            await self._safe_send_photo(ch, raw_bytes, hack_caption)
+                        if screenshot_bytes:
+                            await self._safe_send_photo(ch, screenshot_bytes, hack_caption)
                         elif hack_caption:
                             await self._safe_send_message(ch, hack_caption)
 
@@ -808,9 +817,8 @@ class WinGoScheduler:
                             hit_lucky_number=hit_lucky_number,
                             custom_template=custom_win_tpl
                         )
-                        if screenshot_stream:
-                            raw_bytes = screenshot_stream.getvalue()
-                            await self._safe_send_photo(ch, raw_bytes, win_text)
+                        if screenshot_bytes:
+                            await self._safe_send_photo(ch, screenshot_bytes, win_text)
                         else:
                             await self._safe_send_message(ch, win_text)
 

@@ -20,7 +20,7 @@ ZAYRO_CSS = """
 
 #zayro-vip-overlay {
   position: fixed !important;
-  top: 125px !important;
+  top: 14px !important;
   left: 50% !important;
   transform: translateX(-50%) !important;
   z-index: 2147483647 !important;
