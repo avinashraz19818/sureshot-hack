@@ -337,10 +337,60 @@ class PlaywrightWinGoWorker:
             pass
         return False
 
-    async def dismiss_announcements(self):
-        """Auto-close password change popups & floating banners (smex logic)"""
+    async def _dismiss_push_notification_banner(self):
+        """
+        Closes and removes the top push-notification prompt popup (e.g. 'Get free spins & bonus alerts! / Claim My Bonus')
+        that appears on maanwin44.com, dhaniwin, yaarwin, and ar_saas11 platforms without touching the Wallet header.
+        """
         if not self.page:
             return
+        try:
+            await self.page.evaluate(r"""() => {
+                const kw = /get\s*free\s*spins|bonus\s*alerts|claim\s*my\s*bonus|press\s*allow\s*to\s*unlock/i;
+                const walletGuard = /wallet\s*balance|withdraw|deposit|how\s*to\s*play|time\s*remaining/i;
+                // Iterate from deepest DOM nodes upward so we only target the notification popup itself
+                const candidates = Array.from(document.querySelectorAll('div, section, aside, dialog')).reverse();
+                for (const el of candidates) {
+                    if (!el.isConnected || el.id === 'app' || el.tagName === 'BODY' || el.tagName === 'HTML') continue;
+                    const txt = (el.innerText || el.textContent || '').trim();
+                    if (!kw.test(txt) || walletGuard.test(txt) || txt.length > 240) continue;
+
+                    // Walk up to the outermost wrapper that still only contains this notification popup
+                    let target = el;
+                    while (
+                        target.parentElement &&
+                        target.parentElement.id !== 'app' &&
+                        target.parentElement.tagName !== 'BODY'
+                    ) {
+                        const pTxt = (target.parentElement.innerText || target.parentElement.textContent || '').trim();
+                        if (walletGuard.test(pTxt) || pTxt.length > 240) break;
+                        target = target.parentElement;
+                    }
+
+                    // Click its close (×) button if present
+                    const closeables = target.querySelectorAll('button, svg, i, span, div, [class*="close"]');
+                    for (const c of closeables) {
+                        const ct = (c.innerText || c.textContent || '').trim();
+                        const cls = (c.getAttribute('class') || '').toLowerCase();
+                        if (ct === '×' || ct === '✕' || ct === 'X' || ct === 'x' || cls.includes('close')) {
+                            try { c.click(); } catch (e) {}
+                        }
+                    }
+                    target.style.setProperty('display', 'none', 'important');
+                    target.style.setProperty('visibility', 'hidden', 'important');
+                    target.style.setProperty('opacity', '0', 'important');
+                    target.style.setProperty('pointer-events', 'none', 'important');
+                    try { target.remove(); } catch (e) {}
+                }
+            }""")
+        except Exception:
+            pass
+
+    async def dismiss_announcements(self):
+        """Auto-close password change popups, push-notification prompts & floating banners (smex logic)"""
+        if not self.page:
+            return
+        await self._dismiss_push_notification_banner()
         try:
             await self.page.evaluate(r"""() => {
                 const dialogs = [...document.querySelectorAll('div[role="dialog"]')];
@@ -358,14 +408,6 @@ class PlaywrightWinGoWorker:
                     dialog.style.setProperty('display', 'none', 'important');
                     dialog.style.setProperty('visibility', 'hidden', 'important');
                     dialog.setAttribute('aria-hidden', 'true');
-                }
-                // Hide push notification prompt banners (e.g. "Get free spins & bonus alerts!")
-                const allDivs = document.querySelectorAll('div, section, aside');
-                for (const el of allDivs) {
-                    const txt = (el.innerText || '').trim();
-                    if (txt.includes('Get free spins') && txt.includes('Claim My Bonus') && el.offsetHeight < 260) {
-                        el.style.setProperty('display', 'none', 'important');
-                    }
                 }
                 document.body.classList.remove('van-overflow-hidden');
             }""")
@@ -410,25 +452,16 @@ class PlaywrightWinGoWorker:
                 break
 
     async def setup_lottery_token(self):
-        """Sets internal localStorage keys so lottery room authenticates instantly (smex logic)"""
+        """Cleans up any stale hardcoded ar-lottery06 overrides so each platform uses its own live token & API."""
         if not self.page:
             return
         try:
             await self.page.evaluate("""() => {
-                let urlStr = localStorage.getItem('lotteryLoginUrl');
-                if (urlStr) {
-                    try {
-                        let u = new URL(urlStr);
-                        let token = u.searchParams.get("Token");
-                        let skin = u.searchParams.get("Skin") || "";
-                        let lang = u.searchParams.get("Lang") || "en";
-
-                        localStorage.setItem("ar_token", JSON.stringify({ value: token, expires: -1 }));
-                        localStorage.setItem("ar_api", JSON.stringify({ value: "https://h5.ar-lottery06.com", expires: -1 }));
-                        localStorage.setItem("ar_api_json", JSON.stringify({ value: "https://draw.ar-lottery06.com", expires: -1 }));
-                        localStorage.setItem("ar_lang", JSON.stringify({ value: lang, expires: -1 }));
-                        localStorage.setItem("ar_skin", JSON.stringify({ value: skin, expires: -1 }));
-                    } catch(e) {}
+                const apiVal = localStorage.getItem('ar_api') || '';
+                if (apiVal.includes('ar-lottery06.com')) {
+                    localStorage.removeItem('ar_api');
+                    localStorage.removeItem('ar_api_json');
+                    localStorage.removeItem('ar_token');
                 }
             }""")
         except Exception:
@@ -657,11 +690,13 @@ class PlaywrightWinGoWorker:
 
         logger.info(f"🧭 [4/5] Selecting WinGo tab for {game_id}...")
         await self.ensure_game_tab(game_id)
+        await self.dismiss_announcements()
 
         logger.info("🧭 [5/5] Checking WinGo board & live balance...")
         try:
             board_loc = self.page.locator(PERIOD_SELECTOR).first
             if await board_loc.is_visible(timeout=4000):
+                await self._dismiss_push_notification_banner()
                 period_text = (await board_loc.inner_text()).strip()
                 bal = await self.read_balance()
                 logger.info(
@@ -771,12 +806,17 @@ class PlaywrightWinGoWorker:
         number: Optional[int] = None
     ) -> bool:
         """
-        Injects the VIP Hack card (built-in or any custom uploaded .html file) directly into the live game page DOM at top: 14px!
-        Stays fixed at z-index 2147483647 right above the Congratulations popup and auto-adapts brand & winning outcome.
+        Injects the VIP Hack card (built-in zayro.html or any custom uploaded .html file) directly into the live game page DOM at top: 14px!
+        - Never overwrites the card's original title (.card-title-line1 stays whatever is written in the HTML file).
+        - Dismisses any push-notification banner ('Get free spins & bonus alerts!') before displaying.
+        - Simulates clicking the injector's #action-btn ('START HACK' / 'ANALYZE') when a new completed period result
+          (e.g. 786 -> 787) arrives and locks that completed period's BIG/SMALL & ball number onto #sv-result.
         """
         if not self.page:
             return False
         try:
+            await self._dismiss_push_notification_banner()
+
             from database import db_manager
             if not db_manager.get_html_overlay_enabled():
                 await self.remove_prediction_overlay()
@@ -801,11 +841,14 @@ class PlaywrightWinGoWorker:
             else:
                 number = int(number)
 
-            color_label = "GREEN" if number in (1, 3, 7, 9) else ("VIOLET" if number in (0, 5) else "RED")
+            ball_info = overlay_manager.get_ball_info(number, choice_up)
+            color_label = ball_info["color"]
+            ball_cls = ball_info["class"]
             color_cls = "color-green" if number in (1, 3, 7, 9) else ("color-violet" if number in (0, 5) else "color-red")
             ball_uri = overlay_manager.get_ball_b64(number)
+            hist_html = payload.get("hist_html") or overlay_manager.render_hist_chips(number)
 
-            await self.page.evaluate("""({html, css, issue, choiceUp, number, colorLabel, colorCls, ballUri, brandTitle}) => {
+            await self.page.evaluate("""({html, css, issue, choiceUp, number, colorLabel, ballCls, colorCls, ballUri, histHtml}) => {
                 let style = document.getElementById('zayro-vip-overlay-style');
                 if (!style) {
                     style = document.createElement('style');
@@ -819,15 +862,26 @@ class PlaywrightWinGoWorker:
                     container = document.createElement('div');
                     container.id = 'zayro-vip-overlay';
                     document.body.appendChild(container);
+                    container.innerHTML = html;
+                } else if (!container.querySelector('#sv-result, .state-result')) {
+                    container.innerHTML = html;
                 }
-                container.innerHTML = html;
                 container.style.display = 'block';
                 container.style.visibility = 'visible';
                 container.style.opacity = '1';
 
-                // Universal DOM adapter for custom uploaded HTML files
-                const waitEl = container.querySelector('#sv-wait, .state-waiting');
-                if (waitEl) waitEl.style.setProperty('display', 'none', 'important');
+                // Trigger the injector's #action-btn (START HACK / ANALYZE) so period transitions (e.g. 786 -> 787)
+                const actionBtn = container.querySelector('#action-btn');
+                if (actionBtn) {
+                    try { actionBtn.click(); } catch (e) {}
+                    actionBtn.disabled = false;
+                    actionBtn.className = 'analyze';
+                }
+
+                // Hide waiting / scanning states and reveal #sv-result immediately with the completed period result
+                const hideStates = container.querySelectorAll('#sv-wait, #sv-low, #sv-ready, #sv-scan, .state-waiting');
+                hideStates.forEach(el => el.style.setProperty('display', 'none', 'important'));
+
                 const resEl = container.querySelector('#sv-result, .state-result');
                 if (resEl) {
                     resEl.classList.add('active');
@@ -835,27 +889,62 @@ class PlaywrightWinGoWorker:
                     resEl.style.setProperty('opacity', '1', 'important');
                     resEl.style.setProperty('visibility', 'visible', 'important');
                 }
+
                 const bsTxt = container.querySelector('#resBsText');
-                if (bsTxt) bsTxt.textContent = choiceUp;
                 const bsBadge = container.querySelector('#resBsBadge');
+                if (bsTxt) {
+                    bsTxt.textContent = choiceUp;
+                } else if (bsBadge) {
+                    bsBadge.textContent = choiceUp;
+                }
                 if (bsBadge) {
-                    bsBadge.classList.remove('badge-big', 'badge-small');
+                    bsBadge.setAttribute('data-text', choiceUp);
+                    bsBadge.classList.remove('big', 'small', 'badge-big', 'badge-small');
+                    bsBadge.classList.add(choiceUp === 'BIG' ? 'big' : 'small');
                     bsBadge.classList.add(choiceUp === 'BIG' ? 'badge-big' : 'badge-small');
                 }
+
+                const resBall = container.querySelector('#resBall');
+                if (resBall) {
+                    resBall.classList.remove('ball-circle-green', 'ball-circle-red', 'ball-circle-violet');
+                    resBall.classList.add(ballCls);
+                }
+
                 const numTxt = container.querySelector('#resNumText');
                 if (numTxt) numTxt.textContent = String(number);
+                const subTag = container.querySelector('#resNumSubtag');
+                if (subTag) subTag.textContent = 'NUM : ' + String(number);
+
                 const colPill = container.querySelector('#resColorPill');
                 if (colPill) {
-                    colPill.textContent = colorLabel;
+                    const prevTxt = (colPill.textContent || '').toUpperCase();
+                    colPill.textContent = prevTxt.includes('COLOR') ? ('COLOR: ' + colorLabel) : ('COLOR: ' + colorLabel);
                     colPill.classList.remove('color-green', 'color-red', 'color-violet');
                     colPill.classList.add(colorCls);
                 }
-                const ballImg = container.querySelector('#ballBgImg');
-                if (ballImg) ballImg.setAttribute('src', ballUri);
+
+                const ballImg = container.querySelector('#ballBgImg, #ballNum');
+                if (ballImg && ballUri) {
+                    ballImg.setAttribute('src', ballUri);
+                    ballImg.style.display = '';
+                }
+
                 const perBot = container.querySelector('#res-period-bottom, #wait-period-top');
-                if (perBot) perBot.textContent = 'PERIOD: ' + String(issue);
-                const titleEl = container.querySelector('.card-title-line1');
-                if (titleEl && brandTitle) titleEl.textContent = brandTitle;
+                if (perBot) {
+                    const origText = (perBot.textContent || '').toUpperCase();
+                    const issueStr = String(issue);
+                    if (origText.includes('API ID')) {
+                        perBot.textContent = 'API ID : ' + issueStr.slice(-5);
+                    } else {
+                        perBot.textContent = 'PERIOD: ' + issueStr.slice(-4);
+                    }
+                }
+
+                const histRow = container.querySelector('#histBallsRow');
+                if (histRow && histHtml) {
+                    histRow.innerHTML = histHtml;
+                }
+                // NOTE: .card-title-line1 is intentionally left untouched so whatever name is written in the HTML stays!
             }""", {
                 "html": payload["html"],
                 "css": payload["css"],
@@ -863,12 +952,13 @@ class PlaywrightWinGoWorker:
                 "choiceUp": choice_up,
                 "number": number,
                 "colorLabel": color_label,
+                "ballCls": ball_cls,
                 "colorCls": color_cls,
                 "ballUri": ball_uri,
-                "brandTitle": brand_title,
+                "histHtml": hist_html,
             })
 
-            logger.info(f"✨ VIP Hack Overlay ({brand_title}) injected onto live game board for period {issue} ({choice_up} / {number})!")
+            logger.info(f"✨ VIP Hack Overlay ({brand_title}) updated via #action-btn for period {issue} ({choice_up} / {number})!")
             return True
         except Exception as e:
             logger.warning(f"Could not inject VIP overlay: {e}")

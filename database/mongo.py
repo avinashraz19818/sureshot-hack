@@ -441,33 +441,26 @@ class DatabaseManager:
         return (getattr(config, "DEMO_PASSWORD", "") or "").strip()
 
     def get_overlay_brand_name(self) -> str:
-        cfg = self.get_system_settings()
-        custom_brand = (cfg.get("overlay_brand_name") or "").strip()
-        if custom_brand:
-            return custom_brand
-        url = self.get_game_login_url()
-        try:
-            from urllib.parse import urlparse
-            import re
-            host = (urlparse(url).hostname or "").lower()
-            host = re.sub(r"^(www\.|m\.|h5\.)", "", host)
-            domain_part = host.split(".")[0] if host else "vip"
-            m_prefix = re.match(r"^(\d+[a-zA-Z]+)", domain_part)
-            if m_prefix:
-                clean = m_prefix.group(1).capitalize()
-            else:
-                clean = re.sub(r"\d+$", "", domain_part) or domain_part
-                if clean.endswith("win") and len(clean) > 3:
-                    clean = clean[:-3].capitalize() + "Win"
-                elif clean.endswith("club") and len(clean) > 4:
-                    clean = clean[:-4].capitalize() + "Club"
-                elif clean.endswith("game") and len(clean) > 4:
-                    clean = clean[:-4].capitalize() + "Game"
-                else:
-                    clean = clean.capitalize()
-            return f"{clean} VIP Hack"
-        except Exception:
-            return "VIP SureShot Hack"
+        """
+        Returns the brand title written inside the active HTML file (.card-title-line1) without auto-changing it by URL.
+        """
+        import re
+        custom_tpl = self.get_custom_html_template()
+        if custom_tpl:
+            m = re.search(r'class=["\'][^"\']*card-title-line1[^"\']*["\'][^>]*>(.*?)</div>', custom_tpl, re.IGNORECASE | re.DOTALL)
+            if m and m.group(1).strip():
+                return m.group(1).strip()
+        zayro_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "zayro.html")
+        if os.path.exists(zayro_path):
+            try:
+                with open(zayro_path, "r", encoding="utf-8") as f:
+                    content = f.read(120000)
+                m = re.search(r'class=["\'][^"\']*card-title-line1[^"\']*["\'][^>]*>(.*?)</div>', content, re.IGNORECASE | re.DOTALL)
+                if m and m.group(1).strip():
+                    return m.group(1).strip()
+            except Exception:
+                pass
+        return "BdgWin Vip Hack"
 
     def set_overlay_brand_name(self, name: Optional[str]):
         val = str(name).strip() if name and str(name).strip() else None

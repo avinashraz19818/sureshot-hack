@@ -642,7 +642,7 @@ class OverlayManager:
         ball = cls.get_ball_info(number, "BIG" if outcome_class == "big" else "SMALL")
         ball_b64 = cls.get_ball_b64(ball["number"])
         short_issue = str(issue)[-5:] if len(str(issue)) > 5 else str(issue)
-        brand_title = brand_title or db_manager.get_overlay_brand_name()
+        brand_title = db_manager.get_overlay_brand_name()
 
         custom_tpl = db_manager.get_custom_html_template()
         if custom_tpl and len(custom_tpl.strip()) > 40:
@@ -653,10 +653,10 @@ class OverlayManager:
                 # Strip rules that override host html/body overflow or background
                 st_content = re.sub(r"html\s*,\s*body\s*\{[^}]*\}", "", st_content)
                 st_content = re.sub(r"#target-game-frame\s*\{[^}]*\}", "", st_content)
-                st_content = re.sub(r"#injector-container\s*\{[^}]*\}", "#injector-container { position: relative !important; top: auto !important; left: auto !important; transform: none !important; }", st_content)
+                st_content = re.sub(r"#injector-container\s*\{[^}]*\}", "#injector-container { position: relative !important; top: auto !important; left: auto !important; transform: none !important; display: block !important; visibility: visible !important; opacity: 1 !important; }", st_content)
                 extra_styles.append(st_content)
 
-            # Extract body or card markup
+            # Extract #injector-container or body markup while keeping original .card-title-line1 untouched
             body_match = re.search(r"<body[^>]*>([\s\S]*?)</body>", raw, re.IGNORECASE)
             body_html = body_match.group(1) if body_match else raw
             # Remove scripts, iframes, styles, preview toolbars, and warning modals
@@ -665,7 +665,7 @@ class OverlayManager:
             body_html = re.sub(r"<iframe[\s\S]*?</iframe>", "", body_html, flags=re.IGNORECASE)
             body_html = re.sub(r"<iframe[^>]*>", "", body_html, flags=re.IGNORECASE)
 
-            # Replace placeholders if present
+            # Replace placeholders if present (never overwrite literal card title)
             body_html = (
                 body_html
                 .replace("{issue}", str(issue))
@@ -675,7 +675,6 @@ class OverlayManager:
                 .replace("{level}", str(level))
                 .replace("{number}", str(ball["number"]))
                 .replace("{color}", str(ball["color"]))
-                .replace("{brand}", brand_title)
             )
 
             combined_css = ZAYRO_CSS + "\n" + "\n".join(extra_styles) + """
@@ -688,6 +687,11 @@ class OverlayManager:
             #zayro-vip-overlay #sv-ready,
             #zayro-vip-overlay #sv-scan {
                 display: none !important;
+            }
+            #zayro-vip-overlay #injector-container {
+                display: block !important;
+                visibility: visible !important;
+                opacity: 1 !important;
             }
             #zayro-vip-overlay #sv-result,
             #zayro-vip-overlay [id*="sv-result"] {
@@ -707,6 +711,7 @@ class OverlayManager:
                     "conf_str": conf_str,
                     "short_issue": short_issue,
                     "brand_title": brand_title,
+                    "hist_html": cls.render_hist_chips(ball["number"]),
                 }
 
         html = cls.generate_html(
@@ -728,6 +733,7 @@ class OverlayManager:
             "conf_str": conf_str,
             "short_issue": short_issue,
             "brand_title": brand_title,
+            "hist_html": cls.render_hist_chips(ball["number"]),
         }
 
     @classmethod
