@@ -545,6 +545,10 @@ The template can use placeholders:
 
     elif data == "reset_html_overlay":
         db_manager.set_custom_html_template(None)
+        try:
+            await bet_automation.worker.remove_prediction_overlay()
+        except Exception:
+            pass
         await query.answer("Reset to default Zayro VIP Hack Overlay!", show_alert=True)
         overlay_on = db_manager.get_html_overlay_enabled()
         auto_apk = db_manager.get_auto_send_apk()
@@ -1269,20 +1273,21 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if doc and doc.file_name and doc.file_name.lower().endswith((".html", ".htm")):
         admin_states.pop(user.id, None)
         try:
-            os.makedirs("uploads", exist_ok=True)
             tg_file = await doc.get_file()
             content_bytes = await tg_file.download_as_bytearray()
             html_code = content_bytes.decode("utf-8", errors="ignore")
-            db_manager.set_custom_html_template(html_code)
+            db_manager.set_custom_html_template(html_code, filename=doc.file_name)
             db_manager.set_html_overlay_enabled(True)
-
-            local_path = os.path.join("uploads", "custom_overlay.html")
-            with open(local_path, "w", encoding="utf-8") as f:
-                f.write(html_code)
+            try:
+                await bet_automation.worker.remove_prediction_overlay()
+            except Exception:
+                pass
+            detected_brand = db_manager.get_overlay_brand_name()
 
             await update.message.reply_text(
                 f"✅ <b>Custom HTML Hack Overlay Activated Automatically!</b>\n"
                 f"📄 <b>File:</b> <code>{html.escape(doc.file_name)}</code> ({len(html_code)} chars)\n"
+                f"🏷️ <b>Injector Name:</b> <code>{html.escape(detected_brand)}</code>\n"
                 f"🎯 <b>Auto-Adapt:</b> Winning BIG/SMALL, Ball 0-9 & Period will be injected automatically on every Win Popup!",
                 parse_mode=ParseMode.HTML,
                 reply_markup=_get_main_keyboard()
@@ -1326,20 +1331,22 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif current_state == "waiting_html_file":
             admin_states.pop(user.id, None)
             try:
-                os.makedirs("uploads", exist_ok=True)
                 tg_file = await doc.get_file()
                 content_bytes = await tg_file.download_as_bytearray()
                 html_code = content_bytes.decode("utf-8", errors="ignore")
-                db_manager.set_custom_html_template(html_code)
-
-                local_path = os.path.join("uploads", "custom_overlay.html")
-                with open(local_path, "w", encoding="utf-8") as f:
-                    f.write(html_code)
+                db_manager.set_custom_html_template(html_code, filename=doc.file_name)
+                db_manager.set_html_overlay_enabled(True)
+                try:
+                    await bet_automation.worker.remove_prediction_overlay()
+                except Exception:
+                    pass
+                detected_brand = db_manager.get_overlay_brand_name()
 
                 await update.message.reply_text(
                     f"✅ <b>Custom HTML Overlay Template Uploaded Successfully!</b>\n"
-                    f"📄 File: <code>{doc.file_name}</code> ({len(html_code)} chars)\n"
-                    f"The live game screen will now render this custom card during Playwright automation!",
+                    f"📄 <b>File:</b> <code>{html.escape(doc.file_name or 'custom.html')}</code> ({len(html_code)} chars)\n"
+                    f"🏷️ <b>Injector Name:</b> <code>{html.escape(detected_brand)}</code>\n"
+                    f"The live game screen will now render this exact custom injector during Playwright automation!",
                     parse_mode=ParseMode.HTML,
                     reply_markup=_get_main_keyboard()
                 )
@@ -1695,11 +1702,10 @@ Choose the Telegram Native Colored Button Style below:"""
     # Case 12: Custom HTML Text (Pasted code)
     elif current_state == "waiting_html_file":
         admin_states.pop(user.id, None)
-        db_manager.set_custom_html_template(text)
+        db_manager.set_custom_html_template(text, filename="pasted_custom.html")
+        db_manager.set_html_overlay_enabled(True)
         try:
-            os.makedirs("uploads", exist_ok=True)
-            with open(os.path.join("uploads", "custom_overlay.html"), "w", encoding="utf-8") as f:
-                f.write(text)
+            await bet_automation.worker.remove_prediction_overlay()
         except Exception:
             pass
         await update.message.reply_text(

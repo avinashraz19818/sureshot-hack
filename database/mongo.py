@@ -145,8 +145,6 @@ class DatabaseManager:
                     doc["win_stickers"] = []
                 if "hack_dual_bet_amount" not in doc:
                     doc["hack_dual_bet_amount"] = doc.get("base_bet_amount", 10)
-                if isinstance(doc.get("custom_html_template"), str) and len(doc["custom_html_template"]) > 500:
-                    doc["custom_html_template"] = "uploads/custom_overlay.html"
                 self._memory_settings = doc
                 import time
                 self._last_settings_fetch = time.time()
@@ -163,8 +161,6 @@ class DatabaseManager:
                 doc = self.db.settings.find_one({"key": "system_config"})
                 if doc:
                     doc.pop("_id", None)
-                    if isinstance(doc.get("custom_html_template"), str) and len(doc["custom_html_template"]) > 500:
-                        doc["custom_html_template"] = "uploads/custom_overlay.html"
                     self._memory_settings = doc
                     self._last_settings_fetch = now
                     return doc
@@ -259,51 +255,85 @@ class DatabaseManager:
         self.update_system_settings({"html_overlay_enabled": bool(enabled)})
         return bool(enabled)
 
+    def _get_custom_overlay_disk_path(self) -> str:
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        return os.path.join(base_dir, "uploads", "custom_overlay.html")
+
+    def get_custom_html_filename(self) -> Optional[str]:
+        cfg = self.get_system_settings()
+        return cfg.get("custom_html_filename")
+
     def get_custom_html_template(self) -> Optional[str]:
+        cached = getattr(self, "_custom_html_cache", None)
+        if isinstance(cached, str) and len(cached.strip()) > 40:
+            return cached
+
         cfg = self.get_system_settings()
         val = cfg.get("custom_html_template")
-        if not val:
-            return None
-        # If val points to a file or file exists on disk
-        local_path = os.path.join("uploads", "custom_overlay.html")
-        if val == "uploads/custom_overlay.html" or os.path.exists(local_path):
-            try:
-                with open(local_path, "r", encoding="utf-8") as f:
-                    return f.read()
-            except Exception:
-                return None
-        # If huge string is in mongo, migrate to disk to keep database tiny and fast
-        if isinstance(val, str) and len(val) > 2000:
-            try:
-                os.makedirs("uploads", exist_ok=True)
-                with open(local_path, "w", encoding="utf-8") as f:
-                    f.write(val)
-                self.update_system_settings({"custom_html_template": "uploads/custom_overlay.html"})
-                return val
-            except Exception:
-                pass
-        return val
+        disk_path = self._get_custom_overlay_disk_path()
+        rel_path = os.path.join("uploads", "custom_overlay.html")
 
-    def set_custom_html_template(self, content: Optional[str]):
-        local_path = os.path.join("uploads", "custom_overlay.html")
-        if not content:
-            self.update_system_settings({"custom_html_template": None})
+        # 1. If MongoDB stores the actual HTML content directly, cache it and ensure disk copy is synced
+        if isinstance(val, str) and ("<" in val and ">" in val) and len(val.strip()) > 40:
+            self._custom_html_cache = val
             try:
-                if os.path.exists(local_path):
-                    os.remove(local_path)
+                os.makedirs(os.path.dirname(disk_path), exist_ok=True)
+                if not os.path.exists(disk_path):
+                    with open(disk_path, "w", encoding="utf-8") as f:
+                        f.write(val)
             except Exception:
                 pass
+            return val
+
+        # 2. If val is a path reference or file exists on disk (and val was not explicitly reset to None)
+        if val:
+            for candidate in (disk_path, rel_path):
+                if os.path.exists(candidate):
+                    try:
+                        with open(candidate, "r", encoding="utf-8") as f:
+                            content = f.read()
+                        if content and len(content.strip()) > 40:
+                            self._custom_html_cache = content
+                            return content
+                    except Exception:
+                        pass
+            # Stale pointer with no file on disk -> treat as None so default zayro.html works cleanly
+            return None
+
+        return None
+
+    def set_custom_html_template(self, content: Optional[str], filename: Optional[str] = None):
+        disk_path = self._get_custom_overlay_disk_path()
+        rel_path = os.path.join("uploads", "custom_overlay.html")
+        if not content or not str(content).strip():
+            self._custom_html_cache = None
+            self.update_system_settings({
+                "custom_html_template": None,
+                "custom_html_filename": None,
+            })
+            for candidate in (disk_path, rel_path):
+                try:
+                    if os.path.exists(candidate):
+                        os.remove(candidate)
+                except Exception:
+                    pass
             return
 
-        # Always save content to local disk so Mongo document stays super small and fast
+        clean_content = str(content)
+        self._custom_html_cache = clean_content
         try:
-            os.makedirs("uploads", exist_ok=True)
-            with open(local_path, "w", encoding="utf-8") as f:
-                f.write(content)
-            self.update_system_settings({"custom_html_template": "uploads/custom_overlay.html"})
+            os.makedirs(os.path.dirname(disk_path), exist_ok=True)
+            with open(disk_path, "w", encoding="utf-8") as f:
+                f.write(clean_content)
         except Exception as e:
-            logger.error(f"Error saving custom html template: {e}")
-            self.update_system_settings({"custom_html_template": "active"})
+            logger.error(f"Error saving custom html template to disk: {e}")
+
+        updates = {"custom_html_template": clean_content}
+        if filename:
+            updates["custom_html_filename"] = str(filename).strip()
+        elif not self.get_system_settings().get("custom_html_filename"):
+            updates["custom_html_filename"] = "custom_overlay.html"
+        self.update_system_settings(updates)
 
     def get_auto_send_apk(self) -> bool:
         cfg = self.get_system_settings()
@@ -442,14 +472,28 @@ class DatabaseManager:
 
     def get_overlay_brand_name(self) -> str:
         """
-        Returns the brand title written inside the active HTML file (.card-title-line1) without auto-changing it by URL.
+        Returns the brand title written inside the active HTML file without auto-changing it by URL.
         """
         import re
         custom_tpl = self.get_custom_html_template()
         if custom_tpl:
-            m = re.search(r'class=["\'][^"\']*card-title-line1[^"\']*["\'][^>]*>(.*?)</div>', custom_tpl, re.IGNORECASE | re.DOTALL)
-            if m and m.group(1).strip():
-                return m.group(1).strip()
+            patterns = [
+                r'class=["\'][^"\']*card-title-line1[^"\']*["\'][^>]*>(.*?)</div>',
+                r'id=["\']brandTitle["\'][^>]*>(.*?)</div>',
+                r'id=["\']panelBrand["\'][^>]*>(.*?)</div>',
+                r'class=["\'][^"\']*brand-name[^"\']*["\'][^>]*>(.*?)</div>',
+                r'class=["\'][^"\']*gate-title[^"\']*["\'][^>]*>(.*?)</div>',
+                r'<title[^>]*>(.*?)</title>',
+            ]
+            for pat in patterns:
+                m = re.search(pat, custom_tpl, re.IGNORECASE | re.DOTALL)
+                if m:
+                    cleaned = re.sub(r"<[^>]+>", "", m.group(1)).strip()
+                    if cleaned:
+                        return cleaned
+            fname = self.get_custom_html_filename()
+            if fname:
+                return fname
         zayro_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "zayro.html")
         if os.path.exists(zayro_path):
             try:

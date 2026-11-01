@@ -646,28 +646,27 @@ class OverlayManager:
 
         custom_tpl = db_manager.get_custom_html_template()
         if custom_tpl and len(custom_tpl.strip()) > 40:
+            import hashlib
             raw = custom_tpl.strip()
-            extra_styles = []
-            for sm in re.finditer(r"<style[^>]*>([\s\S]*?)</style>", raw, re.IGNORECASE):
-                st_content = sm.group(1)
-                # Strip rules that override host html/body overflow or background
-                st_content = re.sub(r"html\s*,\s*body\s*\{[^}]*\}", "", st_content)
-                st_content = re.sub(r"#target-game-frame\s*\{[^}]*\}", "", st_content)
-                st_content = re.sub(r"#injector-container\s*\{[^}]*\}", "#injector-container { position: relative !important; top: auto !important; left: auto !important; transform: none !important; display: block !important; visibility: visible !important; opacity: 1 !important; }", st_content)
-                extra_styles.append(st_content)
+            tpl_hash = hashlib.md5(raw.encode("utf-8", errors="ignore")).hexdigest()[:12]
 
-            # Extract #injector-container or body markup while keeping original .card-title-line1 untouched
-            body_match = re.search(r"<body[^>]*>([\s\S]*?)</body>", raw, re.IGNORECASE)
-            body_html = body_match.group(1) if body_match else raw
-            # Remove scripts, iframes, styles, preview toolbars, and warning modals
-            body_html = re.sub(r"<script[\s\S]*?</script>", "", body_html, flags=re.IGNORECASE)
-            body_html = re.sub(r"<style[\s\S]*?</style>", "", body_html, flags=re.IGNORECASE)
-            body_html = re.sub(r"<iframe[\s\S]*?</iframe>", "", body_html, flags=re.IGNORECASE)
-            body_html = re.sub(r"<iframe[^>]*>", "", body_html, flags=re.IGNORECASE)
+            # Neutralize embedded background game iframes and external Firebase/Cloudflare scripts inside custom HTML
+            prepared_raw = re.sub(
+                r'(<iframe\b[^>]*?\bsrc\s*=\s*["\'])([^"\']+)(["\'][^>]*>)',
+                r'\1about:blank\3',
+                raw,
+                flags=re.IGNORECASE,
+            )
+            prepared_raw = re.sub(
+                r'<script\b[^>]*?\bsrc\s*=\s*["\'][^"\']*(?:firebase|gstatic|cloudflare|cdn-cgi)[^"\']*["\'][^>]*>\s*</script>',
+                '',
+                prepared_raw,
+                flags=re.IGNORECASE,
+            )
 
-            # Replace placeholders if present (never overwrite literal card title)
-            body_html = (
-                body_html
+            # Replace optional template placeholders if present (never overwrite literal card title)
+            prepared_raw = (
+                prepared_raw
                 .replace("{issue}", str(issue))
                 .replace("{issue_short}", str(short_issue))
                 .replace("{choice}", main_badge_text)
@@ -677,42 +676,23 @@ class OverlayManager:
                 .replace("{color}", str(ball["color"]))
             )
 
-            combined_css = ZAYRO_CSS + "\n" + "\n".join(extra_styles) + """
-            #zayro-vip-overlay #preview-dashboard,
-            #zayro-vip-overlay #warnOverlay,
-            #zayro-vip-overlay #miniBtn,
-            #zayro-vip-overlay #hitFlash,
-            #zayro-vip-overlay #sv-wait,
-            #zayro-vip-overlay #sv-low,
-            #zayro-vip-overlay #sv-ready,
-            #zayro-vip-overlay #sv-scan {
-                display: none !important;
+            return {
+                "is_custom": True,
+                "tpl_hash": tpl_hash,
+                "raw_html": prepared_raw,
+                "html": "",
+                "css": "",
+                "ball_b64": ball_b64,
+                "ball_num": ball["number"],
+                "ball_color": ball["color"],
+                "ball_class": ball["class"],
+                "choice": main_badge_text,
+                "outcome_class": outcome_class,
+                "conf_str": conf_str,
+                "short_issue": short_issue,
+                "brand_title": brand_title,
+                "hist_html": cls.render_hist_chips(ball["number"]),
             }
-            #zayro-vip-overlay #injector-container {
-                display: block !important;
-                visibility: visible !important;
-                opacity: 1 !important;
-            }
-            #zayro-vip-overlay #sv-result,
-            #zayro-vip-overlay [id*="sv-result"] {
-                display: flex !important;
-            }
-            """
-            if body_html.strip():
-                return {
-                    "html": body_html,
-                    "css": combined_css,
-                    "ball_b64": ball_b64,
-                    "ball_num": ball["number"],
-                    "ball_color": ball["color"],
-                    "ball_class": ball["class"],
-                    "choice": main_badge_text,
-                    "outcome_class": outcome_class,
-                    "conf_str": conf_str,
-                    "short_issue": short_issue,
-                    "brand_title": brand_title,
-                    "hist_html": cls.render_hist_chips(ball["number"]),
-                }
 
         html = cls.generate_html(
             issue=issue,
@@ -722,6 +702,9 @@ class OverlayManager:
             number=number
         )
         return {
+            "is_custom": False,
+            "tpl_hash": "default_zayro",
+            "raw_html": "",
             "html": html,
             "css": ZAYRO_CSS,
             "ball_b64": ball_b64,

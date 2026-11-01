@@ -847,8 +847,312 @@ class PlaywrightWinGoWorker:
             color_cls = "color-green" if number in (1, 3, 7, 9) else ("color-violet" if number in (0, 5) else "color-red")
             ball_uri = overlay_manager.get_ball_b64(number)
             hist_html = payload.get("hist_html") or overlay_manager.render_hist_chips(number)
+            is_custom = bool(payload.get("is_custom"))
+            tpl_hash = str(payload.get("tpl_hash") or ("custom" if is_custom else "default_zayro"))
+            raw_html = str(payload.get("raw_html") or "")
 
-            await self.page.evaluate("""({html, css, issue, choiceUp, number, colorLabel, ballCls, colorCls, ballUri, histHtml}) => {
+            await self.page.evaluate("""({isCustom, tplHash, rawHtml, html, css, issue, choiceUp, number, colorLabel, ballCls, colorCls, ballUri, histHtml}) => {
+                const applyUniversalResult = (rootDoc, rootWin) => {
+                    if (!rootDoc) return;
+
+                    const issueStr = String(issue);
+                    const short5 = issueStr.slice(-5);
+                    const short4 = issueStr.slice(-4);
+                    const isBig = (choiceUp === 'BIG');
+
+                    // 1. If running inside custom injector iframe, invoke its native renderResult() with our exact winning data, then lock state machine
+                    if (rootWin && rootWin !== window) {
+                        try {
+                            rootWin.lastPeriod = issueStr;
+                            rootWin.lockedPeriod = issueStr;
+                            rootWin.predData = { s: choiceUp, n: String(number) };
+                            rootWin.lockedPrediction = { s: choiceUp, n: String(number) };
+                            rootWin.wingoHackDone = true;
+                            rootWin.bypassRunning = false;
+                            rootWin.curState = 'wingo';
+                            if (typeof rootWin.renderResult === 'function') {
+                                rootWin.renderResult({ s: choiceUp, n: String(number) });
+                            }
+                            if (typeof rootWin.setThemeClass === 'function') {
+                                rootWin.setThemeClass(isBig ? 'theme-big' : 'theme-small');
+                            }
+                            const maxId = rootWin.setTimeout(() => {}, 0);
+                            for (let id = 1; id <= maxId; id++) {
+                                rootWin.clearInterval(id);
+                                rootWin.clearTimeout(id);
+                            }
+                            rootWin._goState = () => {};
+                            rootWin.updateUI = () => {};
+                            rootWin.showWarnOverlay = () => {};
+                        } catch (e) {}
+                    }
+
+                    // 2. Ensure main panel container is visible
+                    const mainPanels = rootDoc.querySelectorAll('#injector-container, #panel, #singlePanel, #predPopup, #compact-main-panel, .wrap');
+                    mainPanels.forEach(p => {
+                        p.classList.add('show', 'open', 'active');
+                        p.classList.remove('closing', 'hidden');
+                        p.style.setProperty('display', 'block', 'important');
+                        p.style.setProperty('visibility', 'visible', 'important');
+                        p.style.setProperty('opacity', '1', 'important');
+                    });
+
+                    // 3. Hide non-result states across all injector families
+                    const hideSelectors = [
+                        '#sv-wait', '#sv-low', '#sv-auth', '#sv-locked', '#sv-home', '#sv-ready', '#sv-scan',
+                        '#waitState', '#lowState', '#readyState', '#scanState', '#stBypass', '#wgIdle',
+                        '.state-waiting', '#stageScanner',
+                        '#btn-auth-area', '#btn-locked-area', '#btn-scan-area', '#btn-wingo-area',
+                        '#warnOverlay', '#miniBtn', '#launcher', '#lb-btn', '#preview-dashboard',
+                        '#liveWinLayer', '#activityLayer', '#hitFlash'
+                    ];
+                    rootDoc.querySelectorAll(hideSelectors.join(',')).forEach(el => {
+                        el.classList.remove('active', 'show');
+                        el.style.setProperty('display', 'none', 'important');
+                    });
+
+                    // 4. Show result state containers across all injector families
+                    const flexResultSelectors = ['#sv-result', '#resultState', '#view-result', '#predDisplay', '#predBox', '.state-result', '#btn-result-area'];
+                    rootDoc.querySelectorAll(flexResultSelectors.join(',')).forEach(el => {
+                        el.classList.add('active', 'reveal', 'show');
+                        el.style.setProperty('display', 'flex', 'important');
+                        el.style.setProperty('opacity', '1', 'important');
+                        el.style.setProperty('visibility', 'visible', 'important');
+                    });
+                    const blockResultSelectors = ['#stWingo', '#stageResult'];
+                    rootDoc.querySelectorAll(blockResultSelectors.join(',')).forEach(el => {
+                        el.classList.add('active', 'reveal', 'show');
+                        el.style.setProperty('display', 'block', 'important');
+                        el.style.setProperty('opacity', '1', 'important');
+                        el.style.setProperty('visibility', 'visible', 'important');
+                    });
+
+                    // Ensure animated child elements inside result view are immediately opaque
+                    rootDoc.querySelectorAll('.res-ball, .res-badge-box, .res-period, .lock-line, .brk').forEach(el => {
+                        el.style.setProperty('opacity', '1', 'important');
+                    });
+
+                    // 5. Update Card Shell / Status Badges
+                    const cardShell = rootDoc.querySelector('#cardShell, #panelShell, .card-shell, .panel-shell');
+                    if (cardShell) {
+                        cardShell.classList.remove('st-auth', 'st-locked', 'st-danger', 'st-warn', 'theme-big', 'theme-small', 'theme-scan');
+                        cardShell.classList.add('st-ok', 'st-live', isBig ? 'theme-big' : 'theme-small');
+                    }
+                    const statusBadges = rootDoc.querySelectorAll('#cardBadge, #stateBadge, #engineStatus, #stateLabel, #statusText');
+                    statusBadges.forEach(b => {
+                        b.textContent = 'LIVE';
+                        b.classList.remove('b-auth', 'b-locked', 'b-warn', 'b-danger', 'wait', 'scan');
+                        b.classList.add('b-ok', 'b-live', 'live', 'res');
+                    });
+
+                    // 6. Update BIG / SMALL Badges
+                    const bsTxt = rootDoc.querySelector('#resBsText');
+                    const bsBadge = rootDoc.querySelector('#resBsBadge');
+                    if (bsTxt) {
+                        bsTxt.textContent = choiceUp;
+                    } else if (bsBadge) {
+                        bsBadge.textContent = choiceUp;
+                    }
+                    if (bsBadge) {
+                        bsBadge.setAttribute('data-text', choiceUp);
+                        bsBadge.classList.remove('big', 'small', 'badge-big', 'badge-small', 'is-big', 'is-small');
+                        bsBadge.classList.add(isBig ? 'big' : 'small', isBig ? 'badge-big' : 'badge-small', isBig ? 'is-big' : 'is-small');
+                    }
+
+                    const otherBsSelectors = ['#res-bs-badge', '#predChip', '#resBigSmall', '#resultType', '#predBadge', '#predSize', '#res-sz', '#vxPred'];
+                    rootDoc.querySelectorAll(otherBsSelectors.join(',')).forEach(el => {
+                        el.textContent = choiceUp;
+                        el.setAttribute('data-text', choiceUp);
+                        el.classList.remove('big', 'small', 'badge-big', 'badge-small', 'is-big', 'is-small');
+                        el.classList.add(isBig ? 'big' : 'small', isBig ? 'badge-big' : 'badge-small', isBig ? 'is-big' : 'is-small');
+                    });
+
+                    // 7. Update Ball Ring / Container classes
+                    const resBall = rootDoc.querySelector('#resBall');
+                    if (resBall) {
+                        resBall.classList.remove('ball-circle-green', 'ball-circle-red', 'ball-circle-violet');
+                        resBall.classList.add(ballCls);
+                    }
+                    const predNumCircle = rootDoc.querySelector('#predNumCircle, #res-num-ring');
+                    if (predNumCircle) {
+                        predNumCircle.classList.remove('big', 'small', 'is-big', 'is-small');
+                        predNumCircle.classList.add(isBig ? 'big' : 'small', isBig ? 'is-big' : 'is-small');
+                    }
+
+                    // 8. Update Ball Number text & Ball Image
+                    const numTextSelectors = [
+                        '#resNumText', '#predNumTxt', '#resultFallbackNum', '#resNumFallback',
+                        '#resultDigit', '#ballMainNum', '#resultNumber', '#numOverlay', '#predNumberFallback'
+                    ];
+                    rootDoc.querySelectorAll(numTextSelectors.join(',')).forEach(el => {
+                        el.textContent = String(number);
+                    });
+                    const resNumTxtEl = rootDoc.querySelector('#resNumText');
+                    if (resNumTxtEl) {
+                        resNumTxtEl.classList.add('on');
+                        resNumTxtEl.style.setProperty('display', 'grid', 'important');
+                        resNumTxtEl.style.setProperty('opacity', '1', 'important');
+                    }
+                    const predNumTxtEl = rootDoc.querySelector('#predNumTxt');
+                    const predNumImgEl = rootDoc.querySelector('#predNumImg');
+                    if (predNumTxtEl) {
+                        predNumTxtEl.textContent = String(number);
+                        predNumTxtEl.style.setProperty('display', 'block', 'important');
+                        if (predNumImgEl) {
+                            predNumImgEl.style.setProperty('display', 'none', 'important');
+                        }
+                    }
+
+                    const subTag = rootDoc.querySelector('#resNumSubtag');
+                    if (subTag) subTag.textContent = 'NUM : ' + String(number);
+
+                    // Update Color Pill
+                    const colPill = rootDoc.querySelector('#resColorPill');
+                    if (colPill) {
+                        colPill.textContent = 'COLOR: ' + colorLabel;
+                        colPill.classList.remove('color-green', 'color-red', 'color-violet');
+                        colPill.classList.add(colorCls);
+                    }
+
+                    const ballImgSelectors = [
+                        '#ballBgImg', '#ballNum', '#resNumberImg',
+                        '#resultImage', '#res-num-img', '#predNumberImg', '#ballNum1'
+                    ];
+                    rootDoc.querySelectorAll(ballImgSelectors.join(',')).forEach(imgEl => {
+                        if (!imgEl.closest('#sv-result, #resultState, #view-result, #predDisplay, #predBox, .state-result, #stWingo, #stageResult')) {
+                            return;
+                        }
+                        if (rootWin && (rootWin._BALL_GREEN || rootWin._BALL_RED)) {
+                            const useGreen = [1, 3, 7, 9, 5].includes(Number(number));
+                            imgEl.setAttribute('src', (useGreen ? rootWin._BALL_GREEN : rootWin._BALL_RED) || ballUri);
+                            imgEl.style.display = 'block';
+                        } else if (ballUri) {
+                            imgEl.setAttribute('src', ballUri);
+                            imgEl.style.display = 'block';
+                        }
+                    });
+
+                    // 9. Update Period / Sequence Numbers
+                    rootDoc.querySelectorAll('#resPeriodVal, #resPeriod, #periodNumber, #issueId, #resPeriodNum, #periodTxt, #vxPeriod').forEach(el => {
+                        el.textContent = short5;
+                    });
+                    rootDoc.querySelectorAll('#resSeqVal, #resSeq, #seq-text').forEach(el => {
+                        el.textContent = short4;
+                    });
+                    const resultPeriod = rootDoc.querySelector('#resultPeriod');
+                    if (resultPeriod) resultPeriod.textContent = 'PERIOD: #' + short4;
+                    const statusPeriod = rootDoc.querySelector('#statusPeriod');
+                    if (statusPeriod) statusPeriod.textContent = 'PERIOD // ' + short4;
+                    rootDoc.querySelectorAll('#predPeriodBox, #res-period').forEach(el => {
+                        el.textContent = 'PERIOD: ' + short4;
+                    });
+                    const resPeriodText = rootDoc.querySelector('#res-period-text');
+                    if (resPeriodText) resPeriodText.textContent = 'SEQ NO : ' + short5;
+
+                    const perBot = rootDoc.querySelector('#res-period-bottom, #wait-period-top');
+                    if (perBot) {
+                        const origText = (perBot.textContent || '').toUpperCase();
+                        if (origText.includes('API ID')) {
+                            perBot.textContent = 'API ID : ' + short5;
+                        } else {
+                            perBot.textContent = 'PERIOD: ' + short4;
+                        }
+                    }
+
+                    const histRow = rootDoc.querySelector('#histBallsRow');
+                    if (histRow && histHtml) {
+                        histRow.innerHTML = histHtml;
+                    }
+                };
+
+                let container = document.getElementById('zayro-vip-overlay');
+                if (!container) {
+                    container = document.createElement('div');
+                    container.id = 'zayro-vip-overlay';
+                    document.body.appendChild(container);
+                }
+
+                // Whenever template changes (e.g. custom .html uploaded or reset to default), wipe old overlay DOM immediately!
+                if (container.getAttribute('data-tpl-hash') !== tplHash) {
+                    container.innerHTML = '';
+                    container.setAttribute('data-tpl-hash', tplHash);
+                }
+
+                if (isCustom && rawHtml) {
+                    // Remove default zayro style from host page so it never bleeds into anything
+                    const oldHostStyle = document.getElementById('zayro-vip-overlay-style');
+                    if (oldHostStyle) oldHostStyle.textContent = '';
+
+                    container.style.cssText = 'position:fixed !important; top:0 !important; left:0 !important; width:100vw !important; height:100vh !important; pointer-events:none !important; z-index:2147483647 !important; display:block !important; visibility:visible !important; opacity:1 !important; background:transparent !important;';
+
+                    let frame = document.getElementById('zayro-vip-overlay-frame');
+                    if (!frame) {
+                        frame = document.createElement('iframe');
+                        frame.id = 'zayro-vip-overlay-frame';
+                        frame.setAttribute('allowtransparency', 'true');
+                        frame.style.cssText = 'position:fixed !important; top:0 !important; left:0 !important; width:100vw !important; height:100vh !important; border:none !important; background:transparent !important; pointer-events:none !important; z-index:2147483647 !important;';
+                        container.appendChild(frame);
+                    }
+
+                    const overrideCss = `
+                    <style id="agy-custom-overlay-override">
+                        html, body {
+                            background: transparent !important;
+                            background-color: transparent !important;
+                            overflow: visible !important;
+                        }
+                        #target-game-frame, #gameFrame, .bg-iframe, iframe,
+                        #preview-dashboard, #warnOverlay, #miniBtn, #launcher, #lb-btn,
+                        #liveWinLayer, #activityLayer, #hitFlash, .toast-wrap, #toast {
+                            display: none !important;
+                            opacity: 0 !important;
+                            visibility: hidden !important;
+                            pointer-events: none !important;
+                        }
+                        #injector-container, #panel, #singlePanel, #predPopup, #compact-main-panel, .wrap {
+                            position: fixed !important;
+                            top: 14px !important;
+                            left: 50% !important;
+                            right: auto !important;
+                            bottom: auto !important;
+                            transform: translateX(-50%) !important;
+                            margin: 0 !important;
+                            display: block !important;
+                            visibility: visible !important;
+                            opacity: 1 !important;
+                            z-index: 999999 !important;
+                        }
+                        #sv-wait, #sv-low, #sv-auth, #sv-locked, #sv-home, #sv-ready, #sv-scan, #btn-auth-area, #btn-locked-area, #btn-scan-area, #btn-wingo-area { display: none !important; }
+                         #sv-result, #btn-result-area { display: flex !important; opacity: 1 !important; visibility: visible !important; }
+                         .res-ball, .res-badge-box, .res-period, .lock-line, .brk {
+                            opacity: 1 !important;
+                        }
+                    </style>`;
+
+                    const fDoc = frame.contentDocument || (frame.contentWindow && frame.contentWindow.document);
+                    if (fDoc && frame.getAttribute('data-loaded-hash') !== tplHash) {
+                        let docToWrite = rawHtml;
+                        if (/<\/head>/i.test(docToWrite)) {
+                            docToWrite = docToWrite.replace(/<\/head>/i, overrideCss + '</head>');
+                        } else {
+                            docToWrite = overrideCss + docToWrite;
+                        }
+                        fDoc.open();
+                        fDoc.write(docToWrite);
+                        fDoc.close();
+                        frame.setAttribute('data-loaded-hash', tplHash);
+                    }
+
+                    const activeDoc = frame.contentDocument || (frame.contentWindow && frame.contentWindow.document);
+                    const activeWin = frame.contentWindow;
+                    applyUniversalResult(activeDoc, activeWin);
+                    setTimeout(() => applyUniversalResult(activeDoc, activeWin), 60);
+                    setTimeout(() => applyUniversalResult(activeDoc, activeWin), 180);
+                    return;
+                }
+
+                // Default Built-in zayro.html Fallback ( ONLY when no custom .html is uploaded )
+                container.style.cssText = '';
                 let style = document.getElementById('zayro-vip-overlay-style');
                 if (!style) {
                     style = document.createElement('style');
@@ -857,20 +1161,13 @@ class PlaywrightWinGoWorker:
                 }
                 style.textContent = css;
 
-                let container = document.getElementById('zayro-vip-overlay');
-                if (!container) {
-                    container = document.createElement('div');
-                    container.id = 'zayro-vip-overlay';
-                    document.body.appendChild(container);
-                    container.innerHTML = html;
-                } else if (!container.querySelector('#sv-result, .state-result')) {
+                if (!container.querySelector('#sv-result, .state-result')) {
                     container.innerHTML = html;
                 }
                 container.style.display = 'block';
                 container.style.visibility = 'visible';
                 container.style.opacity = '1';
 
-                // Trigger the injector's #action-btn (START HACK / ANALYZE) so period transitions (e.g. 786 -> 787)
                 const actionBtn = container.querySelector('#action-btn');
                 if (actionBtn) {
                     try { actionBtn.click(); } catch (e) {}
@@ -878,74 +1175,11 @@ class PlaywrightWinGoWorker:
                     actionBtn.className = 'analyze';
                 }
 
-                // Hide waiting / scanning states and reveal #sv-result immediately with the completed period result
-                const hideStates = container.querySelectorAll('#sv-wait, #sv-low, #sv-ready, #sv-scan, .state-waiting');
-                hideStates.forEach(el => el.style.setProperty('display', 'none', 'important'));
-
-                const resEl = container.querySelector('#sv-result, .state-result');
-                if (resEl) {
-                    resEl.classList.add('active');
-                    resEl.style.setProperty('display', 'flex', 'important');
-                    resEl.style.setProperty('opacity', '1', 'important');
-                    resEl.style.setProperty('visibility', 'visible', 'important');
-                }
-
-                const bsTxt = container.querySelector('#resBsText');
-                const bsBadge = container.querySelector('#resBsBadge');
-                if (bsTxt) {
-                    bsTxt.textContent = choiceUp;
-                } else if (bsBadge) {
-                    bsBadge.textContent = choiceUp;
-                }
-                if (bsBadge) {
-                    bsBadge.setAttribute('data-text', choiceUp);
-                    bsBadge.classList.remove('big', 'small', 'badge-big', 'badge-small');
-                    bsBadge.classList.add(choiceUp === 'BIG' ? 'big' : 'small');
-                    bsBadge.classList.add(choiceUp === 'BIG' ? 'badge-big' : 'badge-small');
-                }
-
-                const resBall = container.querySelector('#resBall');
-                if (resBall) {
-                    resBall.classList.remove('ball-circle-green', 'ball-circle-red', 'ball-circle-violet');
-                    resBall.classList.add(ballCls);
-                }
-
-                const numTxt = container.querySelector('#resNumText');
-                if (numTxt) numTxt.textContent = String(number);
-                const subTag = container.querySelector('#resNumSubtag');
-                if (subTag) subTag.textContent = 'NUM : ' + String(number);
-
-                const colPill = container.querySelector('#resColorPill');
-                if (colPill) {
-                    const prevTxt = (colPill.textContent || '').toUpperCase();
-                    colPill.textContent = prevTxt.includes('COLOR') ? ('COLOR: ' + colorLabel) : ('COLOR: ' + colorLabel);
-                    colPill.classList.remove('color-green', 'color-red', 'color-violet');
-                    colPill.classList.add(colorCls);
-                }
-
-                const ballImg = container.querySelector('#ballBgImg, #ballNum');
-                if (ballImg && ballUri) {
-                    ballImg.setAttribute('src', ballUri);
-                    ballImg.style.display = '';
-                }
-
-                const perBot = container.querySelector('#res-period-bottom, #wait-period-top');
-                if (perBot) {
-                    const origText = (perBot.textContent || '').toUpperCase();
-                    const issueStr = String(issue);
-                    if (origText.includes('API ID')) {
-                        perBot.textContent = 'API ID : ' + issueStr.slice(-5);
-                    } else {
-                        perBot.textContent = 'PERIOD: ' + issueStr.slice(-4);
-                    }
-                }
-
-                const histRow = container.querySelector('#histBallsRow');
-                if (histRow && histHtml) {
-                    histRow.innerHTML = histHtml;
-                }
-                // NOTE: .card-title-line1 is intentionally left untouched so whatever name is written in the HTML stays!
+                applyUniversalResult(container, window);
             }""", {
+                "isCustom": is_custom,
+                "tplHash": tpl_hash,
+                "rawHtml": raw_html,
                 "html": payload["html"],
                 "css": payload["css"],
                 "issue": str(issue),
@@ -958,7 +1192,10 @@ class PlaywrightWinGoWorker:
                 "histHtml": hist_html,
             })
 
-            logger.info(f"✨ VIP Hack Overlay ({brand_title}) updated via #action-btn for period {issue} ({choice_up} / {number})!")
+            if is_custom:
+                await asyncio.sleep(0.22)
+
+            logger.info(f"✨ VIP Hack Overlay ({brand_title} | custom={is_custom}) updated for period {issue} ({choice_up} / {number})!")
             return True
         except Exception as e:
             logger.warning(f"Could not inject VIP overlay: {e}")
