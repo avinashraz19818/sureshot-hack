@@ -1,0 +1,24 @@
+#!/bin/bash
+cd "$(dirname "$0")"
+BOT_FILE="main.py"
+PID_FILE="bot.pid"
+
+echo "🛑 Stopping WinGo VIP SureShot Hack Bot..."
+
+if [ -f "$PID_FILE" ]; then
+    PID=$(cat "$PID_FILE")
+    kill $PID 2>/dev/null || true
+    rm -f "$PID_FILE"
+fi
+
+pkill -f ".*${BOT_FILE}" 2>/dev/null || true
+pkill -f ".*chrome" 2>/dev/null || true
+pkill -f ".*chromium" 2>/dev/null || true
+
+sleep 1
+
+if pgrep -f ".*${BOT_FILE}" >/dev/null 2>&1; then
+    pkill -9 -f ".*${BOT_FILE}" 2>/dev/null || true
+fi
+
+echo "✅ Bot and background processes stopped successfully!"
